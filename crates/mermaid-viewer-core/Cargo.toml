@@ -1,0 +1,41 @@
+[package]
+name = "mermaid-viewer-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Core library for mermaid-viewer: Mermaid to SVG/PNG rendering, raylib-based diagram window, and stdio MCP server."
+
+[dependencies]
+mermaid-render = "0.10"
+resvg = "0.48"
+thiserror = "2"
+# PNG encoder for the rasterization step (M-2 contract card: builder's
+# choice). Already in the dependency graph via `usvg`; adding it as a
+# direct dependency does not change the lockfile footprint.
+png = "0.18"
+raylib-ogl = { package = "raylib", version = "6.0", optional = true }
+raylib-sw = { package = "raylib", version = "6.0", default-features = false, features = [
+    "software_renderer",
+    "SUPPORT_MODULE_RSHAPES",
+    "SUPPORT_MODULE_RTEXT",
+    "SUPPORT_MODULE_RTEXTURES",
+    "SUPPORT_IMAGE_GENERATION",
+], optional = true }
+# `macros` enables the `#[tool_router]`/`#[tool]` code generation used by
+# the `mcp` module (the `server` feature alone does not include it).
+rmcp = { version = "3.5", features = ["server", "macros"], optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "io-std", "signal"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+# The `#[derive(JsonSchema)]` on the MCP tool parameter types emits code
+# against the `::schemars` crate, so it must be a direct dependency.
+schemars = { version = "1.2", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+
+[features]
+default = ["view", "mcp"]
+view = ["dep:raylib-ogl"]
+view-headless = ["dep:raylib-sw"]
+mcp = ["dep:rmcp", "dep:tokio", "dep:serde", "dep:schemars"]

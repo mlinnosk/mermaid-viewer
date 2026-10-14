@@ -1,0 +1,100 @@
+# Build/CI contract (blueprint, Global Brief D + [M-5]): from a clean
+# checkout, with dependencies installed by this workflow alone, the five
+# contracted command groups (build, clippy -D warnings, fmt check,
+# `cargo test --workspace`, and the `view-headless` test pass) must all be
+# green on ubuntu-latest and windows-latest.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable, with clippy + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install CMake and graphics dev packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          # CMake + a C/C++ toolchain drive the raylib CMake build. The
+          # X11/OpenGL dev headers and ALSA are needed by the `view`
+          # (raylib-ogl) backend; the headless `view-headless` pass
+          # (raylib software renderer, PLATFORM=Memory) also forces the X11
+          # GLFW backend on in raylib's CMake guard, so the same list covers
+          # both test passes. `clang` provides libclang for bindgen, which
+          # the raylib bindings generate with on every build.
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            clang \
+            libasound2-dev \
+            libgl1-mesa-dev \
+            libx11-dev \
+            libxext-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libxxf86vm-dev
+
+      - name: "Verify toolchain (Windows runner defaults: CMake + MSVC + LLVM/libclang)"
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Nothing to install: the windows-latest image ships CMake, the
+          # MSVC C++ toolchain (Visual Studio Build Tools), and LLVM
+          # (clang + libclang for bindgen) on PATH. Fail fast if any of the
+          # three is missing.
+          cmake --version
+          clang --version
+          & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # ------------------------------------------------------------------
+      # The five contracted command groups, as separate steps.
+      # ------------------------------------------------------------------
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: "Test workspace (default features: view + mcp)"
+        run: cargo test --workspace
+
+      - name: Headless view test pass (software renderer)
+        run: cargo test -p mermaid-viewer-core --no-default-features --features view-headless

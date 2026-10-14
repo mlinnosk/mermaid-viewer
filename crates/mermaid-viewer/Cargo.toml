@@ -1,0 +1,20 @@
+[package]
+name = "mermaid-viewer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "CLI for mermaid-viewer: view Mermaid diagrams in a GUI window, render them to SVG/PNG, and serve them over a stdio MCP server."
+
+[dependencies]
+mermaid-viewer-core = { path = "../mermaid-viewer-core" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "signal"] }
+# `mcp` transport wiring (M-4.b): the core provides the `DiagramServer`
+# handler only; serving it on the stdio transport (`serve_server` +
+# `transport::io::stdio`) is this binary's job. `transport-io` enables
+# the stdio transport module.
+rmcp = { version = "3.5", features = ["server", "transport-io"] }
+
+[dev-dependencies]
+# Newline JSON-RPC frame encoding/parsing for the process-level e2e tests.
+serde_json = "1"
