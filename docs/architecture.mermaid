@@ -1,0 +1,70 @@
+flowchart TD
+    %% ── Actors ────────────────────────────────────────────────
+    User(["Human user<br/>(CLI / GUI)"])
+    Agent(["Coding agent<br/>(MCP client)"])
+
+    %% ── CLI binary crate ──────────────────────────────────────
+    subgraph Bin["mermaid-viewer — CLI binary"]
+        direction TB
+        Main["main.rs<br/>entry point · exit codes 0/1/2"]
+        Cli["cli.rs<br/>clap parsing → Command"]
+        CView["view<br/>source → PNG → window (blocks)"]
+        CRender["render<br/>source → SVG/PNG → file/stdout"]
+        CMcp["mcp<br/>serve DiagramServer on stdio"]
+        Main -->|parse| Cli
+        Main -->|dispatch| CView
+        Main -->|dispatch| CRender
+        Main -->|dispatch| CMcp
+    end
+
+    %% ── Core library crate ────────────────────────────────────
+    subgraph Core["mermaid-viewer-core — library"]
+        direction TB
+        NR["render::NativeRenderer<br/>synchronous · pure · stateless"]
+        WB["view::run_blocking<br/>drives raylib on the calling thread"]
+        WC["view::WindowController<br/>Send+Sync handle → dedicated GUI thread"]
+        GUI["GUI thread (mermaid-viewer-gui)<br/>owns the raylib handle<br/>state: CLOSED ⇄ OPEN"]
+        DS["mcp::DiagramServer<br/>show_diagram / close_diagram<br/>lazily owns a WindowController"]
+        Err["error::Error — Render · Rasterize · View · Io"]
+    end
+
+    %% ── External dependencies ─────────────────────────────────
+    subgraph Deps["external dependencies"]
+        direction TB
+        MR["mermaid-render<br/>parse + layout → SVG"]
+        RSVG["resvg<br/>SVG → PNG raster"]
+        PNG["png<br/>PNG encode/decode"]
+        RAYLIB["raylib<br/>view: OpenGL 3.3 (ogl)<br/>view-headless: software (sw)"]
+        RMCP["rmcp<br/>MCP protocol (stdio)"]
+        TOKIO["tokio<br/>async runtime"]
+    end
+
+    %% ── Actors → CLI ──────────────────────────────────────────
+    User -->|view / render| Main
+    Agent -->|stdio MCP| Main
+
+    %% ── Shared render pipeline (view + render) ────────────────
+    CView -->|Mermaid source| NR
+    CRender -->|Mermaid source| NR
+    NR -->|parse + layout| MR
+    NR -->|rasterize (PNG)| RSVG
+    NR -->|encode (PNG)| PNG
+
+    %% ── view path ─────────────────────────────────────────────
+    CView -->|PNG image| WB
+    WB -->|init · draw| RAYLIB
+    WC -->|mpsc: Open/Update/Close + PNG| GUI
+    GUI -->|init · draw| RAYLIB
+
+    %% ── mcp path ──────────────────────────────────────────────
+    CMcp -->|tokio runtime| TOKIO
+    CMcp -->|serve on stdio| RMCP
+    CMcp --> DS
+    DS -->|render (off-thread)| NR
+    DS -->|update / close| WC
+
+    %% ── Typed errors (dashed) ─────────────────────────────────
+    NR -.-> Err
+    WB -.-> Err
+    WC -.-> Err
+    DS -.-> Err
