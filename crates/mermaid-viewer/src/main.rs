@@ -25,6 +25,7 @@
 mod cli;
 
 use mermaid_viewer_core::error::{Error, Result};
+use mermaid_viewer_core::mcp::CloseDiagramParams;
 use mermaid_viewer_core::{
     run_blocking, DiagramServer, ImageFormat, NativeRenderer, RenderOptions,
 };
@@ -124,7 +125,7 @@ async fn serve_mcp() -> Result<()> {
             if !clean_shutdown {
                 return Err(Error::View(format!("MCP initialize failed: {err}")));
             }
-            server.close().await;
+            server.close(&CloseDiagramParams { id: None }).await?;
             return Ok(());
         }
     };
@@ -148,7 +149,7 @@ async fn serve_mcp() -> Result<()> {
 
     // Shutdown closes the window first (idempotent), then the process
     // exits `0`.
-    server.close().await;
+    server.close(&CloseDiagramParams { id: None }).await?;
     Ok(())
 }
 

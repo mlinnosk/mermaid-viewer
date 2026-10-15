@@ -1,4 +1,4 @@
-//! [M-4.b] Process-level e2e tests for the `mcp` subcommand.
+//! [M-3] Process-level e2e tests for the `mcp` subcommand.
 //!
 //! Each test spawns the real built binary (`mermaid-viewer mcp`) with
 //! `MERMAID_VIEWER_FAKE_WINDOW=1` **set on the child only** (never in this
@@ -11,12 +11,18 @@
 //! test reaps the child with a polling deadline — no test can hang on a
 //! stuck server.
 //!
-//! Contract under test (parent [M-4] contract card):
+//! Contract under test (parent [M-3] contract card, wire behavior from
+//! [M-2]):
 //!
 //! - server name `mermaid-viewer`; exactly two tools: `show_diagram`
-//!   (`{code, title?, scale?}`) and `close_diagram` (`{}`);
-//! - `show_diagram` → `{"status":"opened"}` on the first call,
-//!   `{"status":"updated"}` afterwards; `close_diagram` → `{"closed":true}`;
+//!   (`{code, id?, title?, scale?}`) and `close_diagram` (`{id?}`) — `id`
+//!   is optional in both;
+//! - `show_diagram` → `{"id":"…","status":"opened"}` when it opens the
+//!   (closed) window, `{"id":"…","status":"added"}` for a fresh tab ID,
+//!   and `{"id":"…","status":"updated"}` when re-showing a known ID (an
+//!   omitted `id` uses the `"default"` tab, and `title` is the tab's
+//!   label); `close_diagram` → `{"id":"…","closed":true}` for a targeted
+//!   close and `{"closed":true}` for a close-all (omitted `id`);
 //! - a stdin EOF is a clean shutdown: the server exits `0` and its stdout
 //!   carries only MCP protocol frames.
 
@@ -220,7 +226,8 @@ impl Drop for McpClient {
 /// Named: `e2e_initialize_lists_two_tools` — over the real stdio pipe,
 /// `initialize` (protocol version `2025-11-25`) reports server name
 /// `mermaid-viewer`, and `tools/list` reports exactly the two contract
-/// tools: `show_diagram` and `close_diagram`.
+/// tools: `show_diagram` (`{code, id?, title?, scale?}`, with only `code`
+/// required) and `close_diagram` (`{id?}`, with no required parameter).
 #[test]
 fn e2e_initialize_lists_two_tools() {
     let mut client = McpClient::spawn();
@@ -245,7 +252,8 @@ fn e2e_initialize_lists_two_tools() {
         "the tool names must be exactly show_diagram + close_diagram"
     );
 
-    // `show_diagram` takes exactly `{code, title?, scale?}` per the contract.
+    // `show_diagram` takes exactly `{code, id?, title?, scale?}` per the
+    // contract.
     let show = tools
         .iter()
         .find(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some("show_diagram"))
@@ -258,8 +266,8 @@ fn e2e_initialize_lists_two_tools() {
     let schema_names: BTreeSet<&str> = schema.keys().map(String::as_str).collect();
     assert_eq!(
         schema_names,
-        BTreeSet::from(["code", "scale", "title"]),
-        "show_diagram parameters are exactly code, title?, scale?"
+        BTreeSet::from(["code", "id", "scale", "title"]),
+        "show_diagram parameters are exactly code, id?, title?, scale?"
     );
     let required: Vec<&str> = show
         .get("inputSchema")
@@ -272,18 +280,48 @@ fn e2e_initialize_lists_two_tools() {
         vec!["code"],
         "only `code` is required for show_diagram"
     );
+
+    // `close_diagram` takes exactly `{id?}`: the ID is optional (omitting
+    // it is a close-all) and no parameter is required.
+    let close = tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some("close_diagram"))
+        .expect("close_diagram is listed");
+    let close_schema = close
+        .get("inputSchema")
+        .and_then(|s| s.get("properties"))
+        .and_then(serde_json::Value::as_object)
+        .expect("close_diagram has an inputSchema with properties");
+    let close_schema_names: BTreeSet<&str> = close_schema.keys().map(String::as_str).collect();
+    assert_eq!(
+        close_schema_names,
+        BTreeSet::from(["id"]),
+        "close_diagram parameters are exactly id?"
+    );
+    let close_required: Vec<&str> = close
+        .get("inputSchema")
+        .and_then(|s| s.get("required"))
+        .and_then(serde_json::Value::as_array)
+        .map(|req| req.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(
+        !close_required.contains(&"id"),
+        "`id` must be optional for close_diagram (an omitted ID closes all tabs): {close_required:?}"
+    );
 }
 
-/// Named: `e2e_show_and_close_roundtrip` — over the real stdio pipe,
-/// `show_diagram` opens the window (`{"status":"opened"}`), a second
-/// `show_diagram` hot-swaps it (`{"status":"updated"}`), and
-/// `close_diagram` reports `{"closed":true}`.
+/// Named: `e2e_show_and_close_roundtrip` — over the real stdio pipe, a
+/// `show_diagram` without an `id` opens the window in the `"default"` tab
+/// (`{"id":"default","status":"opened"}`), a second `show_diagram`
+/// replaces that tab (`{"id":"default","status":"updated"}`), and a
+/// `close_diagram` without an `id` closes all tabs
+/// (`{"closed":true}`).
 #[test]
 fn e2e_show_and_close_roundtrip() {
     let mut client = McpClient::spawn();
     client.initialize();
 
-    // First show: opens the (fake) window.
+    // First show (no id): opens the (fake) window in the `"default"` tab.
     client.send(tool_call(2, "show_diagram", json!({ "code": FLOWCHART })));
     let opened = client.read_response(2);
     let result = opened
@@ -293,15 +331,15 @@ fn e2e_show_and_close_roundtrip() {
     assert_not_tool_error(&result, "first show_diagram");
     assert_eq!(
         tool_body(&result),
-        json!({ "status": "opened" }),
-        "the first show opens the window"
+        json!({ "id": "default", "status": "opened" }),
+        "the first show opens the window in the default tab"
     );
 
-    // Second show: hot-swaps the open window.
+    // Second show (no id, new tab label): replaces the `default` tab.
     client.send(tool_call(
         3,
         "show_diagram",
-        json!({ "code": FLOWCHART_TWO, "title": "ignored while open", "scale": 1.0 }),
+        json!({ "code": FLOWCHART_TWO, "title": "Second version", "scale": 1.0 }),
     ));
     let updated = client.read_response(3);
     let result = updated
@@ -311,11 +349,12 @@ fn e2e_show_and_close_roundtrip() {
     assert_not_tool_error(&result, "second show_diagram");
     assert_eq!(
         tool_body(&result),
-        json!({ "status": "updated" }),
-        "a subsequent show updates the open window"
+        json!({ "id": "default", "status": "updated" }),
+        "a re-show of the default tab updates it"
     );
 
-    // Close: idempotent, always reports closed.
+    // Close-all (no id): idempotent, reports `closed: true` with no id in
+    // the body.
     client.send(tool_call(4, "close_diagram", json!({})));
     let closed = client.read_response(4);
     let result = closed
@@ -326,7 +365,103 @@ fn e2e_show_and_close_roundtrip() {
     assert_eq!(
         tool_body(&result),
         json!({ "closed": true }),
-        "close_diagram reports closed: true"
+        "a close-all reports closed: true with no id"
+    );
+}
+
+/// Named: `e2e_two_tabs_close_one` — over the real stdio pipe, showing
+/// two distinct tab IDs (`diag1` then `diag2`) opens and then adds tabs,
+/// a targeted `close_diagram` removes only `diag1`
+/// (`{"id":"diag1","closed":true}`), the surviving `diag2` still updates
+/// on re-show, and a `close_diagram` without an `id` remains available and
+/// closes all (`{"closed":true}` with no id).
+#[test]
+fn e2e_two_tabs_close_one() {
+    let mut client = McpClient::spawn();
+    client.initialize();
+
+    // First show (id `diag1`): opens the (fake) window in a new tab.
+    client.send(tool_call(
+        2,
+        "show_diagram",
+        json!({ "code": FLOWCHART, "id": "diag1" }),
+    ));
+    let opened = client.read_response(2);
+    let result = opened
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("show_diagram response carries a result: {opened}"));
+    assert_not_tool_error(&result, "first show_diagram");
+    assert_eq!(
+        tool_body(&result),
+        json!({ "id": "diag1", "status": "opened" }),
+        "the first show opens the window in the diag1 tab"
+    );
+
+    // Second show (fresh id `diag2`): adds a second tab — `added`, not
+    // `updated`.
+    client.send(tool_call(
+        3,
+        "show_diagram",
+        json!({ "code": FLOWCHART_TWO, "id": "diag2" }),
+    ));
+    let added = client.read_response(3);
+    let result = added
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("show_diagram response carries a result: {added}"));
+    assert_not_tool_error(&result, "second show_diagram");
+    assert_eq!(
+        tool_body(&result),
+        json!({ "id": "diag2", "status": "added" }),
+        "a fresh tab id adds a tab"
+    );
+
+    // Targeted close (`diag1`): removes only that tab and reports its id.
+    client.send(tool_call(4, "close_diagram", json!({ "id": "diag1" })));
+    let closed = client.read_response(4);
+    let result = closed
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("close_diagram response carries a result: {closed}"));
+    assert_not_tool_error(&result, "targeted close_diagram");
+    assert_eq!(
+        tool_body(&result),
+        json!({ "id": "diag1", "closed": true }),
+        "a targeted close reports its id and closed: true"
+    );
+
+    // The survivor: re-showing `diag2` still updates the remaining tab.
+    client.send(tool_call(
+        5,
+        "show_diagram",
+        json!({ "code": FLOWCHART, "id": "diag2" }),
+    ));
+    let updated = client.read_response(5);
+    let result = updated
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("show_diagram response carries a result: {updated}"));
+    assert_not_tool_error(&result, "survivor show_diagram");
+    assert_eq!(
+        tool_body(&result),
+        json!({ "id": "diag2", "status": "updated" }),
+        "the surviving tab still updates on re-show"
+    );
+
+    // Close-all (no id): remains available after the targeted close and
+    // reports `closed: true` with no id in the body.
+    client.send(tool_call(6, "close_diagram", json!({})));
+    let closed_all = client.read_response(6);
+    let result = closed_all
+        .get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("close_diagram response carries a result: {closed_all}"));
+    assert_not_tool_error(&result, "close-all close_diagram");
+    assert_eq!(
+        tool_body(&result),
+        json!({ "closed": true }),
+        "a close-all reports closed: true with no id"
     );
 }
 

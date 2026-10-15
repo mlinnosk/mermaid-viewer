@@ -145,7 +145,9 @@ mermaid-viewer mcp
 
 Takes no arguments. Speaks the Model Context Protocol on stdin/stdout and
 exits `0` cleanly on stdin EOF or Ctrl-C (closing its diagram window first).
-stdout carries only MCP protocol frames; diagnostics go to stderr.
+stdout carries only MCP protocol frames; diagnostics go to stderr. The
+diagram window the server opens is tabbed — several diagrams can stay open
+at once, each under its own tab ID (see `MCP for coding agents` below).
 
 ### Exit codes
 
@@ -160,9 +162,13 @@ Exactly one input source (`FILE`, `-c`/`--code`, `--stdin`) is required per
 
 Prefer the MCP server for agents: a shell `view` call blocks the agent until
 a human closes the window, which is the wrong shape for an agent loop. The
-MCP server keeps a persistent window alive across the session —
-`show_diagram` returns instantly and the agent can iteratively hot-swap the
-window content. The CLI stays for humans and one-shot pipelines.
+MCP server keeps a persistent, tabbed window alive across the session —
+`show_diagram` returns instantly, so the agent can iteratively hot-swap a
+tab's content or keep several diagrams open at once under stable string
+IDs. The window shows a tab bar at the top — the user can select a tab or
+close one directly (closing the last tab closes the window) — with the
+active tab's diagram below it. The CLI stays for humans and one-shot
+pipelines.
 
 Register the server in your MCP client configuration:
 
@@ -172,16 +178,29 @@ Register the server in your MCP client configuration:
 
 Tools:
 
-- `show_diagram({code, title?, scale?})` — renders `code` (Mermaid source) to
-  PNG and shows it in the persistent window. The first call opens the window
-  and returns `{"status":"opened"}`; later calls hot-swap the content and
-  return `{"status":"updated"}`. `title` is used when the window is created;
-  `scale` is the PNG scale (default `2.0`). A rejected source is reported as
-  a tool-level error (`isError: true`) carrying the render message — the
-  server keeps running and serves the next request.
-- `close_diagram({})` — closes the window and returns `{"closed":true}`.
-  Idempotent: closing an already-closed (or never-opened) window also
-  succeeds.
+- `show_diagram({code, id?, title?, scale?})` — renders `code` (Mermaid
+  source) to PNG and shows it in the persistent window under a tab. An
+  omitted `id` uses the `"default"` tab (the old single-diagram workflow);
+  showing a fresh `id` adds a tab and returns
+  `{"id":"…","status":"added"}`; re-showing a known `id` replaces that tab
+  and returns `{"id":"…","status":"updated"}`; and a show that opens the
+  (closed) window returns `{"id":"…","status":"opened"}`. `title` is the
+  tab's label in the tab bar (default: the effective `id`; the OS window
+  title is fixed); `scale` is the PNG scale (default `2.0`). At most 16
+  tabs may be open at once: adding a 17th tab, like a rejected source or
+  an empty `id`, is reported as a tool-level error (`isError: true`)
+  carrying the message — the server keeps running and serves the next
+  request.
+- `close_diagram({id?})` — closes the tab with that `id` and returns
+  `{"id":"…","closed":true}` (closing the last tab closes the window);
+  omitting `id` closes the window and all tabs and returns
+  `{"closed":true}`. Both forms are idempotent: closing an unknown `id` or
+  an already-closed window also succeeds. An empty `id` is a tool-level
+  error (`isError: true`) and the server keeps running.
+
+Markdown support (parsing Mermaid blocks out of Markdown) and multiple
+simultaneous OS windows are not part of this change: the server is one
+window with a tab bar.
 
 ## Renderer coverage
 
