@@ -300,6 +300,24 @@ fn image_from_rgba(rgba: Vec<u8>, width: i32, height: i32) -> Image {
 // Window (raylib side of the state machine)
 // ---------------------------------------------------------------------------
 
+/// The raylib trace-log threshold for windowed builds.
+///
+/// raylib's C-side default is `LOG_INFO`, and its init chatter (GL version,
+/// font load, …) leaks straight into the CLI's stderr. Release builds keep
+/// only `LOG_WARNING` and above; debug builds keep the crate default
+/// (`LOG_INFO`) so the full init trace stays visible when developing
+/// against a real window.
+///
+/// Release is detected as `not(debug_assertions)` (cargo's release profile
+/// turns debug assertions off): cargo sets no `cfg(release)` of its own.
+fn raylib_log_level() -> raylib::consts::TraceLogLevel {
+    if cfg!(not(debug_assertions)) {
+        raylib::consts::TraceLogLevel::LOG_WARNING
+    } else {
+        raylib::consts::TraceLogLevel::LOG_INFO
+    }
+}
+
 /// The open window: its content texture plus the interactive view state
 /// (zoom/pan). Lives only on the thread that owns the raylib handle.
 struct Window {
@@ -323,6 +341,7 @@ impl Window {
             .title(title)
             .resizable()
             .vsync()
+            .log_level(raylib_log_level())
             .build();
         let texture = load_window_texture(&mut rl, &thread, image)?;
         Ok((
@@ -694,6 +713,20 @@ mod tests {
     fn controller_is_send_sync() {
         fn requires_send_sync<T: Send + Sync>() {}
         requires_send_sync::<WindowController>();
+    }
+
+    /// Release builds (no debug assertions) suppress raylib's INFO-level
+    /// window chatter (threshold `LOG_WARNING`); debug builds keep the
+    /// crate default (`LOG_INFO`) so the init trace stays visible for
+    /// development.
+    #[test]
+    fn log_level_is_warning_in_release() {
+        use raylib::consts::TraceLogLevel;
+        if cfg!(not(debug_assertions)) {
+            assert_eq!(raylib_log_level(), TraceLogLevel::LOG_WARNING);
+        } else {
+            assert_eq!(raylib_log_level(), TraceLogLevel::LOG_INFO);
+        }
     }
 
     /// Shared verification plan: `fake_window_lifecycle`.
