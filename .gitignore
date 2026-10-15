@@ -1,0 +1,9 @@
+# Rust build artifacts
+/target
+
+# rustfmt backup files
+**/*.rs.bk
+
+# Local machine-specific build environment (sourced shell exports such as
+# compiler/libclang paths); never commit
+.build_env

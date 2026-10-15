@@ -16,19 +16,76 @@ with blocking and controller modes, and a stdio MCP server for coding agents.
 Prerequisites:
 
 - A Rust toolchain (MSRV 1.88, edition 2021) — e.g. via `rustup`.
-- CMake, and a C/C++ compiler (raylib's native build step).
-- Platform graphics development packages:
-  - **Linux (X11/OpenGL):**
-    `sudo apt-get install -y --no-install-recommends cmake clang \
-     libasound2-dev libgl1-mesa-dev libx11-dev libxext-dev libxi-dev \
-     libxrandr-dev libxinerama-dev libxcursor-dev libxxf86vm-dev`
-    (`clang` supplies libclang, which the raylib bindings need at build time.)
-  - **Windows:** CMake plus the MSVC C++ toolchain (Visual Studio Build
-    Tools, C++ workload), plus LLVM for libclang — `choco install clang`.
+- CMake, a C compiler, **and a C++ compiler** (raylib's native build step;
+  CMake requires a CXX compiler even though raylib itself is C).
+- libclang (the `raylib-sys` build script generates Rust bindings with
+  bindgen, which loads libclang).
+- X11/OpenGL development packages (Linux; per-distro commands below).
+
+**Fedora / RHEL (dnf):**
+
+```sh
+sudo dnf install -y cmake gcc gcc-c++ clang-libs \
+    libX11-devel libxcb-devel libXi-devel \
+    libXcursor-devel libXrandr-devel libXinerama-devel libXxf86vm-devel \
+    libglvnd-devel openal-soft-devel
+```
+
+> **Fedora bindgen quirk:** Fedora's `clang-libs` puts `libclang.so` in
+> `/lib64` but its built-in C headers in `/usr/lib/clang/<ver>/include`, so
+> libclang cannot locate `stdarg.h` and the build fails with
+> `fatal error: 'stdarg.h' file not found` during binding generation. Fix by
+> pointing bindgen at the resource dir (version from `ls /usr/lib/clang`):
+>
+> ```sh
+> export BINDGEN_EXTRA_CLANG_ARGS="-resource-dir=/usr/lib/clang/22"
+> ```
+>
+> One-time system alternative: `sudo ln -s /usr/lib/clang /usr/lib64/clang`.
+
+**Debian / Ubuntu (apt):**
+
+```sh
+sudo apt-get install -y --no-install-recommends cmake clang \
+    libgl1-mesa-dev libx11-dev libxext-dev libxcb1-dev libxi-dev \
+    libxrandr-dev libxinerama-dev libxcursor-dev libxxf86vm-dev \
+    libopenal-dev
+```
+
+(`clang` supplies libclang, which the raylib bindings need at build time.)
+
+**Windows:** CMake plus the MSVC C++ toolchain (Visual Studio Build
+Tools, C++ workload), plus LLVM for libclang — `choco install clang`.
 
 ```sh
 cargo build --release
 # binary: target/release/mermaid-viewer
+```
+
+## Runtime dependencies
+
+The binary statically links raylib and GLFW; it needs on the target system:
+
+- `glibc` and `libgcc` — present on any system.
+- `libX11` (which pulls in `libxcb` and `libXau`) — loaded at process start
+  for **all** subcommands, even headless `render`.
+
+For `view` and `mcp` (anything that opens a window) additionally:
+
+- A running X11 session and an OpenGL/GLX implementation. Desktop systems
+  have this by default; on a bare Linux system install Mesa DRI drivers
+  (Fedora: `sudo dnf install -y mesa-dri-drivers`) and an X server.
+
+The X11 extension libraries (`libXrandr`, `libXi`, `libXcursor`,
+`libXinerama`, `libXxf86vm`) and the GL stack (`libGL`/`libGLX`) are loaded
+dynamically at runtime, not linked directly — they come with any standard
+desktop install. No audio package is needed at runtime: the raylib audio
+module is unused by this app and dropped at link time.
+
+Minimal runtime install for a bare machine (Fedora):
+
+```sh
+sudo dnf install -y libX11 mesa-dri-drivers
 ```
 
 The `view` and `mcp` subcommands open a window on a machine with a display.
