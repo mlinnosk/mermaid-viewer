@@ -179,14 +179,20 @@ Register the server in your MCP client configuration:
 Tools:
 
 - `show_diagram({code, id?, title?, scale?})` — renders `code` (Mermaid
-  source) to PNG and shows it in the persistent window under a tab. An
-  omitted `id` uses the `"default"` tab (the old single-diagram workflow);
-  showing a fresh `id` adds a tab and returns
-  `{"id":"…","status":"added"}`; re-showing a known `id` replaces that tab
-  and returns `{"id":"…","status":"updated"}`; and a show that opens the
-  (closed) window returns `{"id":"…","status":"opened"}`. `title` is the
-  tab's label in the tab bar (default: the effective `id`; the OS window
-  title is fixed); `scale` is the PNG scale (default `2.0`). At most 16
+  source) to SVG and shows it in the persistent window under a tab; the
+  window rasterizes the SVG to a texture on demand (below) —
+  `show_diagram` does no rasterization itself. An omitted `id` uses the
+  `"default"` tab (the old single-diagram workflow); showing a fresh `id`
+  adds a tab and returns `{"id":"…","status":"added"}`; re-showing a known
+  `id` replaces that tab and returns `{"id":"…","status":"updated"}`; and
+  a show that opens the (closed) window returns
+  `{"id":"…","status":"opened"}`. `title` is the tab's label in the tab
+  bar (default: the effective `id`; the OS window title is fixed);
+  `scale` is the initial raster scale hint (default `2.0`): a floor on
+  the tab's first-raster sharpness — the first raster runs at
+  `max(hint, fit × 1.25)`, clamped to the pixel cap — and the window
+  re-rasters at display-appropriate scales as the user zooms. A
+  non-positive or non-finite hint is ignored, never an error. At most 16
   tabs may be open at once: adding a 17th tab, like a rejected source or
   an empty `id`, is reported as a tool-level error (`isError: true`)
   carrying the message — the server keeps running and serves the next
@@ -198,9 +204,28 @@ Tools:
   an already-closed window also succeeds. An empty `id` is a tool-level
   error (`isError: true`) and the server keeps running.
 
+**On-demand rendering.** No rasterization happens on the `show_diagram`
+caller path: the show renders Mermaid source to SVG only and stages the
+tab, and until the tab's first raster lands the window shows a minimal
+placeholder. A dedicated raster worker thread (pure Rust resvg with the
+embedded Carlito font) rasterizes the SVG off the GUI thread, and the
+window uploads the result as a GPU texture when the tab is active. The
+first raster runs at `max(scale hint, fit × 1.25)` — the hint is a floor
+on first-raster sharpness, never a failure parameter — and when a tab is
+activated (or the user zooms) the worker re-rasters at the display scale:
+the window re-rasters once the zoom has been stable for 200 ms and
+deviates more than 1.5× from the live texture's scale, keeping the old
+texture until the new raster lands. At most one tab's texture exists at
+any instant: switching tabs frees the outgoing tab's texture (the new tab
+rasterizes on demand), and every raster is clamped to 16,777,216 pixels
+(4096 × 4096 ≈ 64 MiB of RGBA8), which bounds texture memory.
+
 Markdown support (parsing Mermaid blocks out of Markdown) and multiple
-simultaneous OS windows are not part of this change: the server is one
-window with a tab bar.
+simultaneous OS windows are unsupported: the server is one window with a
+tab bar. The on-demand rendering above changes only the documented
+`scale` meaning — the MCP wire contract (the two tools, their schemas,
+statuses, and result bodies) and the CLI (`view`/`render`, one eager PNG
+per diagram) are unchanged.
 
 ## Renderer coverage
 

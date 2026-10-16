@@ -748,6 +748,134 @@ async fn mcp_show_diagram_render_error() {
     );
 }
 
+/// Named: `mcp_show_diagram_scale_hint_edges` — explicit scale hints
+/// (0.25 and 8.0) succeed with normal statuses, and out-of-range hints
+/// (negative, huge) are *ignored*, never errors: they produce no tool
+/// error and no panic — the show commits normally, exactly as if the hint
+/// had been omitted (wire and typed levels).
+#[tokio::test]
+async fn mcp_show_diagram_scale_hint_edges() {
+    let server = fresh_server();
+
+    // An explicit hint below any fit-based target (0.25): a normal
+    // `opened` — the hint is a floor on first-raster sharpness, never a
+    // parameter the call can fail against.
+    let low = call(
+        server
+            .show_diagram(Parameters(params(FLOWCHART, None, Some(0.25))))
+            .await,
+    );
+    assert_eq!(
+        complete(&low).is_error,
+        Some(false),
+        "scale 0.25 is a valid hint, never a tool error"
+    );
+    assert_eq!(
+        body_json(&low),
+        serde_json::json!({ "id": "default", "status": "opened" })
+    );
+    assert!(server.is_window_open(), "the hinted show opens the window");
+
+    // An explicit hint far above any fit (8.0): a normal `updated` on the
+    // re-show.
+    let high = call(
+        server
+            .show_diagram(Parameters(params(FLOWCHART_TWO, None, Some(8.0))))
+            .await,
+    );
+    assert_eq!(
+        complete(&high).is_error,
+        Some(false),
+        "scale 8.0 is a valid hint, never a tool error"
+    );
+    assert_eq!(
+        body_json(&high),
+        serde_json::json!({ "id": "default", "status": "updated" })
+    );
+
+    // A negative hint is ignored (as if omitted), never an error…
+    let negative = call(
+        server
+            .show_diagram(Parameters(params(FLOWCHART, None, Some(-1.0))))
+            .await,
+    );
+    assert_eq!(
+        complete(&negative).is_error,
+        Some(false),
+        "a negative scale is ignored, never a tool error"
+    );
+    assert_eq!(
+        body_json(&negative),
+        serde_json::json!({ "id": "default", "status": "updated" })
+    );
+
+    // …and a huge hint is clamped to the pixel cap by the window, never an
+    // error, never a panic.
+    let huge = call(
+        server
+            .show_diagram(Parameters(params(FLOWCHART_TWO, None, Some(1e9))))
+            .await,
+    );
+    assert_eq!(
+        complete(&huge).is_error,
+        Some(false),
+        "a huge scale is clamped, never a tool error"
+    );
+    assert_eq!(
+        body_json(&huge),
+        serde_json::json!({ "id": "default", "status": "updated" })
+    );
+
+    // The server is fully usable after the edge hints.
+    let alive = call(
+        server
+            .show_diagram(Parameters(params_with_id(FLOWCHART, "after", None, None)))
+            .await,
+    );
+    assert_eq!(
+        body_json(&alive),
+        serde_json::json!({ "id": "after", "status": "added" })
+    );
+    assert!(
+        server.is_window_open(),
+        "the server survives every hint edge"
+    );
+
+    // Typed mirror: every edge value yields a normal outcome
+    // (`Opened` on the first show, `Updated` on re-shows) — never a
+    // typed error, never a panic.
+    let typed = fresh_server();
+    let first = typed
+        .show(&params(FLOWCHART, None, Some(0.25)))
+        .await
+        .expect("scale 0.25 is a valid hint");
+    assert_eq!(
+        first,
+        ShowDiagramOutcome {
+            id: "default".into(),
+            status: ShowStatus::Opened
+        }
+    );
+    for scale in [8.0_f64, -1.0, 1e9] {
+        let outcome = typed
+            .show(&params(FLOWCHART_TWO, None, Some(scale)))
+            .await
+            .expect("an edge-case hint is never a typed error");
+        assert_eq!(
+            outcome,
+            ShowDiagramOutcome {
+                id: "default".into(),
+                status: ShowStatus::Updated
+            },
+            "a re-show with hint {scale} is a normal `updated`"
+        );
+    }
+    assert!(
+        typed.is_window_open(),
+        "the typed window survives every hint edge"
+    );
+}
+
 /// Named: `mcp_rejects_empty_id` — a provided *empty* tab ID is a
 /// tool-level error on *both* tools, naming the empty-ID problem: on show
 /// the window stays closed, on close the open tabs are preserved; the

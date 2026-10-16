@@ -127,9 +127,22 @@ impl NativeRenderer {
     }
 }
 
-/// Rasterizes a complete SVG document to PNG bytes at `scale` (min 1 px per
-/// side) and returns `(png_bytes, width, height)`.
-fn rasterize_png(svg: &str, scale: f64) -> Result<(Vec<u8>, u32, u32)> {
+/// Rasterizes a complete SVG document to a straight (unassociated) RGBA8
+/// buffer at `scale` (min 1 px per side) and returns
+/// `(rgba8, width, height)`, with `rgba8` row-major and
+/// `rgba8.len() == width * height * 4`.
+///
+/// This is the resvg core of the rasterizer: usvg parse with
+/// [`raster_options()`], a `tiny_skia::Pixmap` rendered at the clamped
+/// scale, and `take_demultiplied()` straight RGBA8. Dimensions follow the
+/// PNG path's rule (`round(svg_size × scale)`, minimum 1 px per side); a
+/// malformed SVG is [`Error::Rasterize`]; a non-finite or non-positive
+/// `scale` is clamped to 1.0, never an error.
+///
+/// Crate-internal: the view module's on-demand raster path (the
+/// controller's `show_tab` seam) calls the same primitive, so the window's
+/// textures and the PNG pipeline rasterize identically.
+pub(crate) fn rasterize_rgba(svg: &str, scale: f64) -> Result<(Vec<u8>, u32, u32)> {
     // Defensive: a non-finite or non-positive scale would produce a
     // degenerate pixel buffer; clamp to 1.0 instead of failing the render.
     let scale = if scale.is_finite() && scale > 0.0 {
@@ -157,9 +170,21 @@ fn rasterize_png(svg: &str, scale: f64) -> Result<(Vec<u8>, u32, u32)> {
         );
     }
     // `take()` would hand back the *premultiplied* RGBA buffer that
-    // `tiny_skia` stores internally; PNG expects straight (unassociated)
+    // `tiny_skia` stores internally; consumers expect straight (unassociated)
     // alpha, so demultiply first.
     let data = pixmap.take_demultiplied(); // straight RGBA8, row-major, len = w*h*4
+
+    Ok((data, width, height))
+}
+
+/// Rasterizes a complete SVG document to PNG bytes at `scale` (min 1 px per
+/// side) and returns `(png_bytes, width, height)`.
+///
+/// Composes [`rasterize_rgba`] with the PNG encode step; the observable
+/// behavior (dimensions, pixel values, bytes) is that of the raw buffer
+/// encoded with straight RGBA8.
+fn rasterize_png(svg: &str, scale: f64) -> Result<(Vec<u8>, u32, u32)> {
+    let (data, width, height) = rasterize_rgba(svg, scale)?;
 
     // The `png::Encoder`/`Writer` borrow the output buffer for their whole
     // lifetime, so the encode step is scoped to release the borrow before
@@ -282,6 +307,56 @@ mod tests {
             "expected no green/blue channel, got ({},{})",
             center[1],
             center[2]
+        );
+    }
+
+    /// A 20×20 SVG at scale 2 rasterizes to (40, 40) with a `w*h*4`
+    /// straight-RGBA8 buffer, and the geometry matches what
+    /// `rasterize_png` reports for the same input and scale.
+    #[test]
+    fn rasterize_rgba_dimensions_and_stride() {
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\">\
+                   <rect x=\"5\" y=\"5\" width=\"10\" height=\"10\" fill=\"#ff0000\"/>\
+                   </svg>";
+        let (rgba, w, h) = rasterize_rgba(svg, 2.0).expect("rasterizes");
+        assert_eq!((w, h), (40, 40));
+        assert_eq!(rgba.len(), (w * h * 4) as usize, "buffer must be w*h*4");
+        // The PNG path reports the same geometry for the same input.
+        let (png, pw, ph) = rasterize_png(svg, 2.0).expect("renders");
+        assert_eq!((pw, ph), (w, h), "PNG path reports the same dimensions");
+        let (pixels, dw, dh) = decode_rgba(&png);
+        assert_eq!((dw, dh), (w, h));
+        assert_eq!(pixels.len(), rgba.len() / 4);
+    }
+
+    /// A 50%-opacity red rect yields full-strength red with ~50% alpha in
+    /// the *raw* buffer: no premultiplication, and no PNG round-trip
+    /// involved (the straight-alpha guarantee is checked on the primitive
+    /// directly, not just after the PNG encode/decode).
+    #[test]
+    fn rasterize_rgba_straight_alpha() {
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\">\
+                   <rect x=\"5\" y=\"5\" width=\"10\" height=\"10\" fill=\"#ff0000\" fill-opacity=\"0.5\"/>\
+                   </svg>";
+        let (rgba, w, h) = rasterize_rgba(svg, 1.0).expect("rasterizes");
+        assert_eq!((w, h), (20, 20));
+        let center = (10 * w + 10) as usize;
+        // 50% red on transparent, unassociated: R = 255, G = B = 0, A ≈ 128.
+        let a = rgba[center * 4 + 3];
+        assert!(
+            (100..=155).contains(&a),
+            "expected ~50% straight alpha, got {a}"
+        );
+        let r = rgba[center * 4];
+        assert!(
+            r >= 230,
+            "expected full-strength red channel (straight alpha), got {r} (premultiplied would be ~128)"
+        );
+        let g = rgba[center * 4 + 1];
+        let b = rgba[center * 4 + 2];
+        assert!(
+            g < 10 && b < 10,
+            "expected no green/blue channel, got ({g},{b})"
         );
     }
 

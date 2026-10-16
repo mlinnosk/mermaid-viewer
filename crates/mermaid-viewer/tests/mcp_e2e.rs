@@ -25,6 +25,12 @@
 //!   close and `{"closed":true}` for a close-all (omitted `id`);
 //! - a stdin EOF is a clean shutdown: the server exits `0` and its stdout
 //!   carries only MCP protocol frames.
+//!
+//! [M-4] adds `e2e_scale_describes_initial_raster_hint`: the `tools/list`
+//! `scale` property description documents the initial-raster-hint
+//! semantics (a floor on first-raster sharpness, default 2.0, clamped to
+//! a pixel cap, degenerate values ignored — the wire contract itself is
+//! unchanged).
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, Write};
@@ -308,6 +314,90 @@ fn e2e_initialize_lists_two_tools() {
         !close_required.contains(&"id"),
         "`id` must be optional for close_diagram (an omitted ID closes all tabs): {close_required:?}"
     );
+}
+
+/// Named: `e2e_scale_describes_initial_raster_hint` — over the real
+/// stdio pipe, the `tools/list` `scale` property of `show_diagram`
+/// documents the initial-raster-hint semantics: a floor on the window's
+/// first raster sharpness with a 2.0 default, clamped to a pixel cap,
+/// with non-finite/non-positive values ignored rather than errored — the
+/// documented meaning of `scale` after the SVG/on-demand rasterization
+/// work (the wire contract: names, shapes, statuses, bodies — is
+/// unchanged).
+#[test]
+fn e2e_scale_describes_initial_raster_hint() {
+    let mut client = McpClient::spawn();
+    client.initialize();
+
+    client.send(request(2, "tools/list", json!({})));
+    let response = client.read_response(2);
+    let tools = response
+        .get("result")
+        .and_then(|r| r.get("tools"))
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("tools/list response carries a tools array: {response}"));
+
+    let show = tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some("show_diagram"))
+        .expect("show_diagram is listed");
+    let scale = show
+        .get("inputSchema")
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.get("scale"))
+        .unwrap_or_else(|| panic!("show_diagram's inputSchema carries a scale property: {show}"));
+    let description = scale
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("the scale property carries a description: {scale}"));
+
+    // The schema joins the doc-comment lines with newlines; normalize
+    // whitespace so the assertions check the wording, not the breaks.
+    let normalized: String = description.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        normalized.contains("initial raster scale hint"),
+        "the scale description names the initial raster scale hint: {description}"
+    );
+    assert!(
+        normalized.contains("default 2.0"),
+        "the scale description documents the 2.0 default: {description}"
+    );
+    assert!(
+        normalized.contains("floor"),
+        "the scale description documents the hint as a floor on first-raster \
+         sharpness: {description}"
+    );
+    assert!(
+        normalized.contains("pixel cap"),
+        "the scale description documents the pixel cap: {description}"
+    );
+    assert!(
+        normalized.contains("never an error"),
+        "the scale description documents that degenerate values are ignored, \
+         never an error: {description}"
+    );
+    // The schema shape around the description is unchanged: `scale` stays
+    // an optional number (the parameter is not required).
+    let required: Vec<&str> = show
+        .get("inputSchema")
+        .and_then(|s| s.get("required"))
+        .and_then(serde_json::Value::as_array)
+        .map(|req| req.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    assert!(
+        !required.contains(&"scale"),
+        "scale stays optional in the wire contract: {required:?}"
+    );
+
+    // Regression: the tool set itself is unchanged (the two contract
+    // tools, exactly).
+    let names: BTreeSet<&str> = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+        .collect();
+    let expected: BTreeSet<&str> = ["close_diagram", "show_diagram"].iter().copied().collect();
+    assert_eq!(names, expected, "the tool names are unchanged");
 }
 
 /// Named: `e2e_show_and_close_roundtrip` — over the real stdio pipe, a

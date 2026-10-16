@@ -5,13 +5,16 @@
 //! protocol (server name `mermaid-viewer`):
 //!
 //! - **`show_diagram {code, id?, title?, scale?}`** — renders the Mermaid
-//!   source to PNG and shows it in the persistent tabbed diagram window
+//!   source to SVG and shows it in the persistent tabbed diagram window
 //!   under a tab ID: an omitted `id` uses `"default"` (the existing
 //!   single-diagram workflow), a fresh `id` adds a tab
 //!   (`{"status":"added"}`), re-showing a known `id` replaces that tab
 //!   (`{"status":"updated"}`), and a show that opens the (closed) window
 //!   reports `{"status":"opened"}`. `title` is the tab's label (default:
-//!   the effective ID); the OS window title is fixed. A rejected source,
+//!   the effective ID); the OS window title is fixed. `scale` is the
+//!   initial raster scale hint: a floor on the window's first raster
+//!   sharpness (the raster runs at `max(hint, fit × headroom)`, clamped
+//!   to a pixel cap). A rejected source,
 //!   an empty `id`, and view failures (including the 16-tab limit) are
 //!   *tool-level* error results (`isError: true`, content carrying the
 //!   message) — never a protocol error, never a panic — so the server
@@ -99,9 +102,9 @@ use crate::view::WindowController;
 /// title).
 const DEFAULT_TITLE: &str = "mermaid-viewer";
 
-/// The default PNG scale when `show_diagram` omits `scale` (matches
-/// [`RenderOptions::default()`]).
-const DEFAULT_PNG_SCALE: f64 = 2.0;
+/// The default initial raster scale hint when `show_diagram` omits
+/// `scale` (matches [`RenderOptions::default()`]).
+const DEFAULT_INITIAL_RASTER_SCALE: f64 = 2.0;
 
 /// The default tab ID when `show_diagram` omits `id`: the existing
 /// single-diagram workflow, unchanged — every such diagram is shown in the
@@ -147,15 +150,20 @@ impl DiagramServer {
 
     /// Directly-callable `show_diagram` logic (no MCP transport).
     ///
-    /// Renders `params.code` to PNG at `params.scale` (default
-    /// [`DEFAULT_PNG_SCALE`], i.e. the same default as
-    /// [`RenderOptions::default()`]) and shows it in the tabbed window
+    /// Renders `params.code` to SVG and shows it in the tabbed window
     /// under the effective tab ID: an omitted `id` uses
     /// [`DEFAULT_TAB_ID`], and a provided *empty* ID is rejected with a
     /// typed [`crate::error::Error::View`] naming the empty-ID problem,
     /// before anything is rendered. The tab label is `params.title` if
     /// provided, else the effective ID (the OS window title is always the
     /// fixed [`DEFAULT_TITLE`]).
+    ///
+    /// `params.scale` (if provided) is the show's initial raster scale
+    /// hint (default [`DEFAULT_INITIAL_RASTER_SCALE`], i.e. the same
+    /// default as [`RenderOptions::default()`]): a floor on the window's
+    /// first raster sharpness (the GUI thread rasters the SVG at
+    /// `max(hint, fit × headroom)`, clamped to a pixel cap — a non-finite
+    /// or non-positive hint is ignored, never an error).
     ///
     /// The status describes this commit against the tab-ID registry:
     /// [`ShowStatus::Opened`] (the window was closed and this call opened
@@ -168,15 +176,14 @@ impl DiagramServer {
         let id = effective_id(params)?;
         let label = params.title.clone().unwrap_or_else(|| id.clone());
         let code = params.code.clone();
-        let scale = params.scale.unwrap_or(DEFAULT_PNG_SCALE);
+        let scale = params.scale.unwrap_or(DEFAULT_INITIAL_RASTER_SCALE);
 
         // 1. Render (synchronous + pure) off the tokio worker threads.
+        //    The show path carries SVG: the raster happens on the window's
+        //    GUI thread at the hint's fit-aware target, so the render
+        //    options (the PNG scale) are immaterial here.
         let rendered = tokio::task::spawn_blocking(move || {
-            NativeRenderer::new().render(
-                &code,
-                ImageFormat::Png,
-                &RenderOptions { png_scale: scale },
-            )
+            NativeRenderer::new().render(&code, ImageFormat::Svg, &RenderOptions::default())
         })
         .await
         .map_err(|e| Error::View(format!("render task did not complete: {e}")))?;
@@ -184,13 +191,14 @@ impl DiagramServer {
 
         // 2. Commit the window + registry state transition off the worker
         //    threads too (a first show blocks until the GUI thread opens
-        //    the window).
+        //    the window and rasters the tab's SVG).
         let state = Arc::clone(&self.state);
         let committed_id = id.clone();
-        let status =
-            tokio::task::spawn_blocking(move || state.commit_show(&committed_id, &label, &image))
-                .await
-                .map_err(|e| Error::View(format!("window task did not complete: {e}")))?;
+        let status = tokio::task::spawn_blocking(move || {
+            state.commit_show(&committed_id, &label, &image, scale)
+        })
+        .await
+        .map_err(|e| Error::View(format!("window task did not complete: {e}")))?;
         let status = status?;
 
         Ok(ShowDiagramOutcome { id, status })
@@ -320,10 +328,21 @@ impl State {
     /// registry — `Opened` (registry empty), `Updated` (ID known), or
     /// `Added` (ID unknown, registry non-empty).
     ///
+    /// `initial_scale` is the show's initial raster scale hint, passed
+    /// through to `show_tab` unchanged: the GUI thread rasters the tab's
+    /// SVG at `max(hint, fit × headroom)`, clamped to the pixel cap
+    /// (degenerate hints are ignored there, never an error).
+    ///
     /// Spawn and `show_tab` failures propagate with the registry untouched
     /// (a failed show never corrupts it); the ID is inserted only after
     /// `show_tab` acknowledges success.
-    fn commit_show(&self, id: &str, label: &str, image: &RenderedImage) -> CoreResult<ShowStatus> {
+    fn commit_show(
+        &self,
+        id: &str,
+        label: &str,
+        image: &RenderedImage,
+        initial_scale: f64,
+    ) -> CoreResult<ShowStatus> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         Self::reconcile(&mut inner);
 
@@ -345,7 +364,7 @@ impl State {
                 .controller
                 .insert(WindowController::spawn(DEFAULT_TITLE)?),
         };
-        controller.show_tab(id, label, image)?;
+        controller.show_tab(id, label, image, initial_scale)?;
         inner.tab_ids.insert(id.to_string());
         Ok(status)
     }
@@ -398,7 +417,10 @@ pub struct ShowDiagramParams {
     /// ID). The OS window title is fixed and not user-settable.
     #[serde(default)]
     pub title: Option<String>,
-    /// PNG pixel scale for the window image (default 2.0).
+    /// The initial raster scale hint for the window image (default 2.0):
+    /// a floor on the window's first raster sharpness (the raster runs at
+    /// `max(hint, fit × headroom)`, clamped to a pixel cap). A non-finite
+    /// or non-positive value is ignored, never an error.
     #[serde(default)]
     pub scale: Option<f64>,
 }
