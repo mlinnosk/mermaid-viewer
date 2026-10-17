@@ -177,3 +177,38 @@ fn cli_render_bad_input_exits_1() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// Shared verification plan [M-2.b]: `view_watch_fake_env_smoke` —
+/// spawn the real binary with `MERMAID_VIEWER_FAKE_WINDOW=1` and
+/// `view --watch <tempfile>`: the watch path renders the initial
+/// diagram, opens the update channel, spawns the watcher thread, and
+/// runs the fake update-drain window, which returns after draining —
+/// exit 0, no display, no hang: `main`'s `std::process::exit` does not
+/// wait on the (blocking) watcher thread.
+#[test]
+fn view_watch_fake_env_smoke() {
+    let dir = TempDir::new("watch-smoke");
+    let input = dir.path("diagram.mmd");
+    std::fs::write(&input, FLOWCHART).expect("write input file");
+
+    let out = std::process::Command::new(bin())
+        .env("MERMAID_VIEWER_FAKE_WINDOW", "1")
+        .arg("view")
+        .arg("--watch")
+        .arg(&input)
+        .output()
+        .expect("spawn mermaid-viewer");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "view --watch under the fake window backend must exit 0; \
+         stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "no diagnostics expected on a clean watch startup: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

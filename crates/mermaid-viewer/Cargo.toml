@@ -14,6 +14,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "sig
 # `transport::io::stdio`) is this binary's job. `transport-io` enables
 # the stdio transport module.
 rmcp = { version = "3.5", features = ["server", "transport-io"] }
+# `view --watch` (M-2.b): file-system change detection for the re-render
+# loop. The watcher is built on the watched file's *parent* directory —
+# directory-level watching is what observes the atomic-save renames most
+# editors use (CC-7).
+notify = "8"
 
 [dev-dependencies]
 # Newline JSON-RPC frame encoding/parsing for the process-level e2e tests.

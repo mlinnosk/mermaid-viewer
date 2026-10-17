@@ -4,6 +4,12 @@
 //!
 //! - [`run_blocking`] — a one-diagram window driven on the *current* thread,
 //!   for the CLI `view` subcommand. Returns when the window is closed.
+//! - [`run_blocking_updates`] — [`run_blocking`] plus an update-drain mode:
+//!   the same window, driven on the *current* thread, whose content is
+//!   replaced by every PNG received on a per-frame, non-blocking update
+//!   channel — with the user's zoom and pan retained (the `view --watch`
+//!   re-render path). A closed channel is simply "no updates" and never
+//!   ends the run.
 //! - [`WindowController`] — a dedicated, spawned GUI thread that owns the
 //!   tabbed raylib window and is driven over a plain-data channel; for the
 //!   MCP server, whose main thread runs a tokio runtime.
@@ -977,6 +983,25 @@ impl TabbedState {
         Ok(self.active)
     }
 
+    /// Replaces the tab `id`'s content with `image`, retaining everything
+    /// else: its `zoom`, `pan_x`, `pan_y`, `label`, and the active index
+    /// are carried over unchanged. This is the update path of the
+    /// CLI's [`run_blocking_updates`] window (the `view --watch`
+    /// re-render) — in contrast to [`Self::show`], which is the replace
+    /// path that *resets* the view to re-fit. The fit is recomputed
+    /// against the new image's dimensions by the layout on the next draw,
+    /// so the retained `zoom` stays a relative multiplier over the new
+    /// fit. Returns whether a tab was updated (unknown IDs are a no-op).
+    fn update_content(&mut self, id: &str, image: &RenderedImage) -> bool {
+        match self.index_of(id) {
+            Some(pos) => {
+                self.tabs[pos].image = image.clone();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Removes the tab with ID `id` and adjusts the active index: a
     /// removal before the active tab shifts it down, a removal of the
     /// active tab activates the tab that shifts into its place, and a
@@ -1652,6 +1677,50 @@ impl Window {
         Ok(())
     }
 
+    /// Replaces the *active* tab's content and texture with `image` — the
+    /// update path the CLI window's per-frame drain (the
+    /// [`run_blocking_updates`] re-render) and the headless pixel tests
+    /// drive: the PNG is checked (`ensure_png`) and uploaded, the tab's
+    /// content is replaced through [`TabbedState::update_content`]
+    /// (retaining its zoom, pan, label, and the active index), and the
+    /// texture is swapped into the active slot. The upload happens *before*
+    /// any state is touched, so a failed decode keeps the last good content
+    /// live.
+    ///
+    /// `#[doc(hidden)]` seam: mirrors [`load_window_texture`] /
+    /// [`Self::add_ready_tab`] for the headless pixel tests
+    /// (`view-headless`) and the real window's update drain — both drive
+    /// the exact production update path through it.
+    #[doc(hidden)]
+    pub fn apply_update(
+        &mut self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+        image: &RenderedImage,
+    ) -> Result<()> {
+        ensure_png(image)?;
+        let texture = load_window_texture(rl, thread, image)?;
+        let id = self
+            .state
+            .active()
+            .map(|t| t.id.clone())
+            .ok_or_else(|| Error::View("the window has no active tab to update".to_string()))?;
+        if !self.state.update_content(&id, image) {
+            // Unreachable: the ID came from the live active tab — keep the
+            // state untouched (the fresh texture is dropped with the
+            // function) if it ever is.
+            return Err(Error::View("the window has no active tab to update".to_string()));
+        }
+        // Swap the texture into the active slot. The CLI path's eager
+        // textures carry the image's own pixels at scale 1.0, like
+        // `add_ready_tab`.
+        self.slots[self.state.active_index()] = TextureSlot::Ready {
+            texture,
+            scale: 1.0,
+        };
+        Ok(())
+    }
+
     /// Rasterizes a tab's SVG document at `scale` into straight RGBA8
     /// (the crate's shared resvg primitive, so the window's textures and
     /// the PNG pipeline rasterize identically): malformed SVG is
@@ -1797,20 +1866,43 @@ impl Window {
     }
 
     /// One frame of the *single-diagram* (CLI) window: full-window frame, no
-    /// tab strip. This is the [`run_blocking`] path and is unchanged from the
-    /// original one-diagram viewer (the image fills the whole window).
+    /// tab strip. This is the [`run_blocking`] / [`run_blocking_updates`]
+    /// path and is unchanged from the original one-diagram viewer (the
+    /// image fills the whole window), aside from the per-frame,
+    /// non-blocking update drain below.
     ///
-    /// Returns `false` when the window should close (ESC pressed or the
-    /// window-close requested by the OS) or when no tab remains.
-    fn step_cli(&mut self, rl: &mut RaylibHandle, thread: &RaylibThread) -> bool {
+    /// Before the input and the draw, every PNG currently queued on
+    /// `updates` is applied through [`Self::apply_update`] — replacing the
+    /// active tab's content and texture while retaining its zoom/pan (so an
+    /// update appears on the frame it is drained). The drain is non-blocking
+    /// (`try_recv`), and a channel whose senders are all dropped is simply
+    /// empty — it never ends the run. A non-PNG update is a typed
+    /// [`Error::View`] ending the run (a programming error: the channel only
+    /// ever carries successfully rendered PNGs).
+    ///
+    /// Returns `Ok(false)` when the window should close (ESC pressed or the
+    /// window-close requested by the OS) or when no tab remains, and
+    /// `Err` for a malformed (non-PNG) update.
+    fn step_cli(
+        &mut self,
+        rl: &mut RaylibHandle,
+        thread: &RaylibThread,
+        updates: &Receiver<RenderedImage>,
+    ) -> Result<bool> {
         // Input events are polled by raylib inside `EndDrawing` (the draw
         // handle's drop each frame), which is the standard event pump.
         if rl.window_should_close() || rl.is_key_pressed(KeyboardKey::KEY_ESCAPE) {
-            return false;
+            return Ok(false);
         }
         // No active tab (the last one went): the caller closes the window.
         if self.state.active().is_none() {
-            return false;
+            return Ok(false);
+        }
+        // The per-frame update drain: everything currently queued is
+        // applied before this frame draws. Non-blocking, and a
+        // disconnected channel is simply empty (never a terminator).
+        while let Ok(update) = updates.try_recv() {
+            self.apply_update(rl, thread, &update)?;
         }
         self.apply_input(rl);
 
@@ -1833,7 +1925,7 @@ impl Window {
                 self.state.tabs[active].pan_y,
             );
         }
-        true
+        Ok(true)
     }
 
     /// One frame of the *tabbed* controller window: the raygui tab bar across
@@ -2153,16 +2245,61 @@ impl Default for Window {
 /// thread, as one full-window tab. Blocks until the window is closed (ESC
 /// or window close), then returns.
 ///
-/// With `MERMAID_VIEWER_FAKE_WINDOW=1` this validates the image and returns
-/// immediately (no display, no raylib init).
+/// This is [`run_blocking_updates`] with a closed update channel (no
+/// updates ever queued): the plain `view` and the update-drain
+/// `view --watch` window share one code path, a dropped sender behaving
+/// as "no updates" in the per-frame drain.
+///
+/// With `MERMAID_VIEWER_FAKE_WINDOW=1` this validates the image and
+/// returns immediately (no display, no raylib init).
 ///
 /// SVG input is rejected with [`Error::View`] (and no window is opened):
 /// the CLI path keeps its eager single-diagram PNG behavior (decode +
 /// upload up front, no SVG, no raster scale policy) — the controller
 /// window is the SVG-on-demand side of the input split.
 pub fn run_blocking(title: &str, image: &RenderedImage) -> Result<()> {
+    // One code path: the plain `view` is the update-drain window with a
+    // closed (and drained) update channel.
+    let (tx, rx) = mpsc::channel::<RenderedImage>();
+    drop(tx);
+    run_blocking_updates(title, image, &rx)
+}
+
+/// Shows `image` (PNG) in a GUI window titled `title`, on the *current*
+/// thread, as one full-window tab — and replaces the tab's content (and
+/// texture) for every PNG received on `updates`, *retaining* the tab's
+/// zoom, pan, and label (the fit is recomputed against each new image's
+/// dimensions by the existing layout, so the retained zoom stays a
+/// relative multiplier over the new fit).
+///
+/// The update drain is per-frame and non-blocking: every frame, before the
+/// input and the draw, everything currently queued on `updates` is applied
+/// (an update thus appears on the frame it lands). A channel whose senders
+/// are all dropped is simply empty and never ends the run. A value on the
+/// channel that is not a PNG is a typed [`Error::View`] ending the run (a
+/// programming error — the `view --watch` watcher only sends successfully
+/// rendered PNGs).
+///
+/// With `MERMAID_VIEWER_FAKE_WINDOW=1` this validates `image` (PNG check),
+/// drains the currently queued updates validating each one, and returns
+/// immediately (no display, no raylib init, no blocking on the channel).
+///
+/// SVG input is rejected with [`Error::View`] (and no window is opened),
+/// as in [`run_blocking`].
+pub fn run_blocking_updates(
+    title: &str,
+    image: &RenderedImage,
+    updates: &Receiver<RenderedImage>,
+) -> Result<()> {
     if fake_window_enabled() {
-        return ensure_png(image);
+        ensure_png(image)?;
+        // The fake backend drains what is already queued (validating each
+        // PNG) and returns: it never blocks on the channel, and a
+        // disconnected channel is simply empty.
+        while let Ok(update) = updates.try_recv() {
+            ensure_png(&update)?;
+        }
+        return Ok(());
     }
     ensure_png(image)?;
     let (mut rl, thread) = Window::init_raylib(title)?;
@@ -2174,9 +2311,10 @@ pub fn run_blocking(title: &str, image: &RenderedImage) -> Result<()> {
     let texture = load_window_texture(&mut rl, &thread, image)?;
     window.add_ready_tab("default", title, image, texture)?;
     // The CLI view is a single-diagram, full-window frame (no tab strip) —
-    // `step_cli` draws exactly that, independent of the controller's tabbed
-    // frame path.
-    while window.step_cli(&mut rl, &thread) {}
+    // `step_cli` draws exactly that, independently of the controller's
+    // tabbed frame path, and drains `updates` per frame (the update-drain
+    // mode).
+    while window.step_cli(&mut rl, &thread, updates)? {}
     Ok(())
 }
 
@@ -3754,6 +3892,117 @@ mod tests {
         std::env::set_var(FAKE_WINDOW_ENV, "1");
         let png = test_png(2, 2, [255, 255, 255, 255]);
         assert!(run_blocking("fake", &png).is_ok());
+    }
+
+    /// Shared verification plan: `update_content_retains_view`.
+    ///
+    /// Pure update path (no raylib, runs under every feature pass): an
+    /// update replaces only the tab's content — `zoom`, `pan_x`, `pan_y`,
+    /// `label`, and the active index are carried over unchanged (CC-2) —
+    /// and an update for an unknown ID is a no-op that changes nothing.
+    #[test]
+    fn update_content_retains_view() {
+        let image_a = test_png(8, 8, [255, 0, 0, 255]);
+        let image_b = test_png(16, 16, [0, 255, 0, 255]);
+
+        let mut tabs = TabbedState::new();
+        tabs.show("a", "A", &image_a).expect("add a");
+        tabs.show("b", "B", &image_a).expect("add b");
+        assert_eq!(tabs.active_index(), 1, "the last shown tab is active");
+
+        // Distinct, non-default view state on the (inactive) tab "a".
+        let tab = &mut tabs.tabs[0];
+        tab.zoom = 2.5;
+        tab.pan_x = 42.0;
+        tab.pan_y = -8.5;
+
+        assert!(tabs.update_content("a", &image_b), "a known ID is updated");
+        let tab = &tabs.tabs[0];
+        assert_eq!(tab.image.format, image_b.format, "the content's format is B's");
+        assert_eq!(
+            (tab.image.width, tab.image.height),
+            (image_b.width, image_b.height),
+            "the content's dimensions are B's"
+        );
+        assert_eq!(&tab.image.bytes, &image_b.bytes, "the content's bytes are B's");
+        assert_eq!(tab.zoom, 2.5, "the zoom is retained");
+        assert_eq!(tab.pan_x, 42.0, "the pan_x is retained");
+        assert_eq!(tab.pan_y, -8.5, "the pan_y is retained");
+        assert_eq!(tab.label, "A", "the label is retained");
+        assert_eq!(tabs.active_index(), 1, "the active index is unchanged");
+        assert_eq!(
+            tabs.tabs[1].image.width,
+            image_a.width,
+            "the other tab is untouched"
+        );
+
+        // An unknown ID: `false`, and nothing changes.
+        assert!(!tabs.update_content("nope", &image_a), "an unknown ID is a no-op");
+        let tab = &tabs.tabs[0];
+        assert_eq!(
+            &tab.image.bytes,
+            &image_b.bytes,
+            "the unknown-ID update changed no content"
+        );
+        assert_eq!(tab.zoom, 2.5, "…no zoom");
+        assert_eq!(tab.pan_x, 42.0, "…no pan_x");
+        assert_eq!(tab.pan_y, -8.5, "…no pan_y");
+        assert_eq!(tab.label, "A", "…no label");
+        assert_eq!(tabs.active_index(), 1, "…no active index");
+        assert_eq!(tabs.len(), 2, "…and no tab was added");
+    }
+
+    /// Shared verification plan: `fake_run_blocking_updates_drains_and_validates`.
+    ///
+    /// The fake backend's update drain (no display, no blocking): the
+    /// initial image and every currently queued update are validated
+    /// (PNG-only) and the queued updates are consumed, a non-PNG update is
+    /// a typed [`Error::View`], and a disconnected channel is simply "no
+    /// updates".
+    #[test]
+    fn fake_run_blocking_updates_drains_and_validates() {
+        std::env::set_var(FAKE_WINDOW_ENV, "1");
+        let initial = test_png(2, 2, [255, 255, 255, 255]);
+
+        // (a) Two queued PNGs: `Ok`, and both updates are consumed.
+        {
+            let (tx, rx) = mpsc::channel::<RenderedImage>();
+            tx.send(test_png(4, 4, [1, 2, 3, 255])).expect("queue update 1");
+            tx.send(test_png(8, 2, [4, 5, 6, 255])).expect("queue update 2");
+            drop(tx);
+            assert!(
+                run_blocking_updates("fake", &initial, &rx).is_ok(),
+                "the fake backend drains the queued PNGs and returns immediately"
+            );
+            assert!(
+                matches!(rx.try_recv(), Err(TryRecvError::Disconnected)),
+                "both queued updates were consumed (the sender is gone)"
+            );
+        }
+
+        // (b) A queued SVG: a typed [`Error::View`] (and no window).
+        {
+            let (tx, rx) = mpsc::channel::<RenderedImage>();
+            tx.send(test_svg(8, 8, "#123456")).expect("queue the SVG update");
+            drop(tx);
+            let err = run_blocking_updates("fake", &initial, &rx)
+                .expect_err("a non-PNG update is rejected");
+            assert!(
+                matches!(err, Error::View(_)),
+                "the non-PNG update is a typed View error, got: {err:?}"
+            );
+        }
+
+        // (c) A disconnected channel with the initial PNG: `Ok` (no
+        // updates, no blocking).
+        {
+            let (tx, rx) = mpsc::channel::<RenderedImage>();
+            drop(tx);
+            assert!(
+                run_blocking_updates("fake", &initial, &rx).is_ok(),
+                "a disconnected channel is simply empty"
+            );
+        }
     }
 
     /// Shared verification plan: `fit_layout_math`.

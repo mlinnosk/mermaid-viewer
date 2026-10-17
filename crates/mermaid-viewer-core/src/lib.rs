@@ -55,4 +55,4 @@ pub mod mcp;
 pub use mcp::DiagramServer;
 pub use render::{ImageFormat, NativeRenderer, RenderOptions, RenderedImage};
 #[cfg(any(feature = "view", feature = "view-headless"))]
-pub use view::{run_blocking, WindowController};
+pub use view::{run_blocking, run_blocking_updates, WindowController};

@@ -10,11 +10,17 @@
 //! [`NativeRenderer`] → bytes written to stdout (`-o -`) or a file.
 //! As of M-3.b the `view` handler is real: source → [`NativeRenderer`]
 //! (PNG at `--scale`) → [`run_blocking`] on a GUI window titled
-//! `--title`, blocking until the window is closed. As of M-4.b the `mcp`
-//! handler is real: the core's [`DiagramServer`] is served on the stdio
-//! transport over a multi-threaded tokio runtime, and the process exits
-//! `0` on stdin EOF or Ctrl-C (closing the window first). stdout carries
-//! only MCP protocol frames; every diagnostic goes to stderr via
+//! `--title`, blocking until the window is closed. `view --watch FILE`
+//! (M-2.b of the watch feature) is real as well: after the initial render
+//! (which still fails before any window opens), a watcher thread on the
+//! file's *parent* directory re-renders the diagram on every debounced
+//! file change and pushes the new PNG into the same window via
+//! [`run_blocking_updates`] (retaining zoom/pan); a failed re-render
+//! prints a diagnostic and keeps the last good diagram. As of M-4.b the
+//! `mcp` handler is real: the core's [`DiagramServer`] is served on the
+//! stdio transport over a multi-threaded tokio runtime, and the process
+//! exits `0` on stdin EOF or Ctrl-C (closing the window first). stdout
+//! carries only MCP protocol frames; every diagnostic goes to stderr via
 //! [`main`]. Source reading ([`read_source`]) is real.
 //!
 //! Lint policy: `#![deny(unsafe_code)]` — the binary contains no `unsafe`
@@ -24,13 +30,26 @@
 
 mod cli;
 
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::time::{Duration, Instant};
+
 use mermaid_viewer_core::error::{Error, Result};
 use mermaid_viewer_core::mcp::CloseDiagramParams;
 use mermaid_viewer_core::{
-    run_blocking, DiagramServer, ImageFormat, NativeRenderer, RenderOptions,
+    run_blocking, run_blocking_updates, DiagramServer, ImageFormat, NativeRenderer,
+    RenderedImage, RenderOptions,
 };
+// Method resolution only (the `.watch` arm in `spawn_watcher`); the
+// concrete type is `notify::RecommendedWatcher`.
+use notify::Watcher as _;
 
 use crate::cli::{parse, Command, OutputFormat, RenderArgs, ViewArgs, BIN_NAME};
+
+/// Debounce quiet window for `view --watch`: a burst of change events
+/// settles into exactly one re-render after 200 ms without further events
+/// on the watched file.
+const WATCH_DEBOUNCE: Duration = Duration::from_millis(200);
 
 fn main() {
     let args = std::env::args().skip(1);
@@ -163,6 +182,11 @@ async fn serve_mcp() -> Result<()> {
 /// window is ever opened. With `MERMAID_VIEWER_FAKE_WINDOW=1` the core's
 /// fake window backend takes over, so the whole path runs without a
 /// display (CI).
+///
+/// With `--watch` (which clap restricts to a `FILE` source), the initial
+/// render is followed by [`run_view_watch`]: a watcher thread pushes
+/// re-rendered PNGs into the window's update channel while
+/// [`run_blocking_updates`] runs.
 fn run_view(source: &str, args: &ViewArgs) -> Result<()> {
     let image = NativeRenderer::new().render(
         source,
@@ -171,7 +195,157 @@ fn run_view(source: &str, args: &ViewArgs) -> Result<()> {
             png_scale: args.scale,
         },
     )?;
-    run_blocking(&args.title, &image)
+    if args.watch {
+        // clap's `requires = "file"` (plus the `--code`/`--stdin`
+        // conflicts, amended CC-5) guarantees a `FILE` source reaches the
+        // watch path; the defensive typed error keeps this total.
+        let file = args
+            .file
+            .as_deref()
+            .ok_or_else(|| Error::Render("--watch requires a FILE source".to_string()))?;
+        run_view_watch(file, &args.title, args.scale, &image)
+    } else {
+        run_blocking(&args.title, &image)
+    }
+}
+
+/// The `view --watch` handler (M-2.b): the initial `image` was rendered
+/// before any window (a failure already returned above), so open the
+/// update channel, spawn the watcher thread (typed failure → exit 1
+/// *before* the window opens), then run the update-drain window,
+/// blocking until the window is closed.
+///
+/// When the window closes, `rx` is dropped with the call; the watcher's
+/// next `send` fails and the thread exits — the process then terminates
+/// (exit 0) without waiting for the watcher.
+fn run_view_watch(file: &Path, title: &str, scale: f64, initial: &RenderedImage) -> Result<()> {
+    let (tx, rx) = channel::<RenderedImage>();
+    spawn_watcher(file, scale, tx)?;
+    run_blocking_updates(title, initial, &rx)
+}
+
+/// Build notify's recommended watcher on the watched file's *parent*
+/// directory (directory-level watching observes the atomic-save renames
+/// most editors use — a rename *onto* the file is only visible from the
+/// directory) and spawn the watcher thread that owns it.
+///
+/// Construction failures (watcher creation, arming the watch) are typed
+/// [`Error`]s returned to the caller, so they exit 1 before any window
+/// opens.
+fn spawn_watcher(file: &Path, scale: f64, tx: Sender<RenderedImage>) -> Result<()> {
+    // A bare file name (`d.mmd`) has an empty parent; watch `.` instead.
+    // Canonicalizing the watch root is what makes the event filter exact:
+    // notify builds event paths as `watched_root.join(name)`, so a bare
+    // relative name watched from `.` would surface as `./d.mmd` and never
+    // compare equal to the target as typed.
+    let dir = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let dir = std::fs::canonicalize(dir)?;
+    let name = file
+        .file_name()
+        .ok_or_else(|| Error::View(format!("cannot watch {file:?}: no file name component")))?;
+    let target = dir.join(name);
+    // The callback runs on the watcher's internal thread (notify 8 hands
+    // no event receiver back); forward each event onto a channel the
+    // watcher-loop thread consumes.
+    let (event_tx, event_rx) = channel::<notify::Event>();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        if let Ok(event) = res {
+            let _ = event_tx.send(event);
+        }
+    })
+    .map_err(|e| Error::View(format!("failed to create file watcher: {e}")))?;
+    watcher
+        .watch(&dir, notify::RecursiveMode::NonRecursive)
+        .map_err(|e| Error::View(format!("failed to watch {dir:?}: {e}")))?;
+    // The watcher is moved into the thread: dropping it would stop the
+    // watch, so it lives for the whole loop.
+    std::thread::spawn(move || watch_loop(target, scale, tx, watcher, event_rx));
+    Ok(())
+}
+
+/// Watcher-thread body: filter the directory's events to the watched
+/// file, debounce bursts (one re-render per [`WATCH_DEBOUNCE`] quiet
+/// window after the last change event), re-read + re-render the file,
+/// and send each new PNG on `tx`.
+///
+/// The thread ends when (a) a `send` fails — the window is closed and
+/// `rx` is dropped — or (b) the event channel disconnects (the watcher
+/// was dropped, a fatal watcher failure).
+fn watch_loop(
+    target: PathBuf,
+    scale: f64,
+    tx: Sender<RenderedImage>,
+    _watcher: notify::RecommendedWatcher,
+    events: Receiver<notify::Event>,
+) {
+    // Quiet-window anchor: set on each event for the watched file, cleared
+    // when the settle render fires. Non-matching events (other files in
+    // the directory) do not move it.
+    let mut last_change: Option<Instant> = None;
+    loop {
+        let wait = match last_change {
+            Some(instant) => instant.elapsed().min(WATCH_DEBOUNCE),
+            None => WATCH_DEBOUNCE,
+        };
+        match events.recv_timeout(wait) {
+            Ok(event) if event.paths.iter().any(|path| path == &target) => {
+                last_change = Some(Instant::now());
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                if let Some(instant) = last_change {
+                    // `recv_timeout` can edge a hair early; only fire once
+                    // a full quiet window has actually elapsed.
+                    if instant.elapsed() >= WATCH_DEBOUNCE {
+                        last_change = None;
+                        if !rerender_and_send(&target, scale, &tx) {
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// Re-read + re-render `target` (at `scale`) and send the PNG on `tx`.
+///
+/// Returns `false` only when the `send` fails (the window is closed),
+/// which ends the watcher thread. A failed re-render — a transient
+/// invalid source while editing, an unreadable or mid-save file — prints
+/// the CC-6 diagnostic to stderr and returns `true`: the window keeps
+/// the last good diagram and watching continues.
+fn rerender_and_send(target: &Path, scale: f64, tx: &Sender<RenderedImage>) -> bool {
+    let source = match std::fs::read_to_string(target) {
+        Ok(source) => source,
+        Err(err) => {
+            watch_render_diagnostic(&err);
+            return true;
+        }
+    };
+    match NativeRenderer::new().render(
+        &source,
+        ImageFormat::Png,
+        &RenderOptions {
+            png_scale: scale,
+        },
+    ) {
+        Ok(image) => tx.send(image).is_ok(),
+        Err(err) => {
+            watch_render_diagnostic(&err);
+            true
+        }
+    }
+}
+
+/// CC-6: the exact watch diagnostic line, on stderr.
+fn watch_render_diagnostic(err: &dyn std::fmt::Display) {
+    eprintln!("{BIN_NAME}: watch: render failed: {err}; keeping the previous diagram");
 }
 
 /// The `render` handler: `source` → [`NativeRenderer`] → bytes to stdout
@@ -273,6 +447,7 @@ mod tests {
             file: None,
             code: Some("graph TD\n  A-->B".to_string()),
             stdin: false,
+            watch: false,
             title: DEFAULT_TITLE.to_string(),
             scale: 2.0,
         });
@@ -332,6 +507,7 @@ mod tests {
             file: None,
             code: Some("graph TD\n  A-->B".to_string()),
             stdin: false,
+            watch: false,
             title: DEFAULT_TITLE.to_string(),
             scale: 2.0,
         });
@@ -351,10 +527,44 @@ mod tests {
             file: None,
             code: Some("gitGraph\n  frobnicate".to_string()),
             stdin: false,
+            watch: false,
             title: DEFAULT_TITLE.to_string(),
             scale: 2.0,
         });
         assert!(matches!(run(command), Err(Error::Render(_))));
+    }
+
+    /// Shared verification plan [M-2.b]:
+    /// `run_view_watch_bad_initial_source_is_render_error` — a `FILE`
+    /// source the parser rejects, with `--watch`: `run` returns the typed
+    /// [`Error::Render`] *before* any window (and before the watcher is
+    /// even constructed): the initial render is the first fallible step
+    /// of the watch path, exactly as for plain `view`.
+    #[test]
+    fn run_view_watch_bad_initial_source_is_render_error() {
+        let path = std::env::temp_dir().join(format!(
+            "mermaid-viewer-watch-src-{}-{}.mmd",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, "gitGraph\n  frobnicate\n").unwrap();
+        let command = Command::View(ViewArgs {
+            file: Some(path.clone()),
+            code: None,
+            stdin: false,
+            watch: true,
+            title: DEFAULT_TITLE.to_string(),
+            scale: 2.0,
+        });
+        assert!(
+            matches!(run(command), Err(Error::Render(_))),
+            "a bad initial source with --watch must fail with a typed \
+             render error before the window opens"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// `render` is real in M-2.b: a valid `--code` source renders to SVG

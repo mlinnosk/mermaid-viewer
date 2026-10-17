@@ -3,7 +3,7 @@
 //! This module is the single source of truth for the CLI contract:
 //!
 //! ```text
-//! mermaid-viewer view   [FILE]  [-c|--code <SRC>] [--stdin] [-t|--title <T>] [-s|--scale <F>]
+//! mermaid-viewer view   [FILE]  [-c|--code <SRC>] [--stdin] [-w|--watch] [-t|--title <T>] [-s|--scale <F>]
 //! mermaid-viewer render [FILE]  [-c|--code <SRC>] [--stdin] [-o|--output <P>] [-f|--format svg|png] [-s|--scale <F>]
 //! mermaid-viewer mcp
 //! ```
@@ -72,12 +72,17 @@ pub struct ViewArgs {
     pub file: Option<PathBuf>,
 
     /// Mermaid source code, passed inline.
-    #[arg(short = 'c', long, value_name = "SRC", group = "source")]
+    #[arg(short = 'c', long, value_name = "SRC", group = "source", conflicts_with = "watch")]
     pub code: Option<String>,
 
     /// Read the Mermaid source from stdin.
-    #[arg(long, group = "source")]
+    #[arg(long, group = "source", conflicts_with = "watch")]
     pub stdin: bool,
+
+    /// Re-render the window whenever the file changes on disk.
+    /// Requires a `FILE` source.
+    #[arg(short = 'w', long, requires = "file")]
+    pub watch: bool,
 
     /// Window title.
     #[arg(short = 't', long, value_name = "TITLE", default_value = DEFAULT_VIEW_TITLE)]
@@ -146,6 +151,91 @@ mod tests {
                 assert_eq!(args.title, "Mermaid Diagram");
                 assert!(args.code.is_none());
                 assert!(!args.stdin);
+            }
+            other => panic!("expected View, got {other:#?}"),
+        }
+    }
+
+    /// Shared verification plan: `view_parses_watch_flag`.
+    ///
+    /// `--watch` parses into `ViewArgs.watch == true` alongside a `FILE`
+    /// source; a plain `FILE` parse leaves `watch == false` (the default).
+    #[test]
+    fn view_parses_watch_flag() {
+        let command = parse(["view", "--watch", "d.mmd"]).unwrap();
+        match command {
+            Command::View(args) => {
+                assert!(args.watch, "--watch must set `watch` to true");
+                assert_eq!(
+                    args.file.as_deref(),
+                    Some(std::path::Path::new("d.mmd")),
+                    "the FILE source must be recorded alongside --watch"
+                );
+            }
+            other => panic!("expected View, got {other:#?}"),
+        }
+
+        let command = parse(["view", "d.mmd"]).unwrap();
+        match command {
+            Command::View(args) => {
+                assert!(!args.watch, "watch must default to false when --watch is absent");
+                assert_eq!(
+                    args.file.as_deref(),
+                    Some(std::path::Path::new("d.mmd")),
+                    "the FILE source must parse as before"
+                );
+            }
+            other => panic!("expected View, got {other:#?}"),
+        }
+    }
+
+    /// Shared verification plan: `watch_requires_file_source`.
+    ///
+    /// `--watch` requires a `FILE` source: pairing it with `--code` or
+    /// `--stdin` (neither of which is a `FILE`) is a clap usage error,
+    /// which `main` maps to exit code 2.
+    #[test]
+    fn watch_requires_file_source() {
+        assert!(
+            parse(["view", "--watch", "--code", "graph TD"]).is_err(),
+            "--watch with a --code source must be a usage error"
+        );
+        assert!(
+            parse(["view", "--watch", "--stdin"]).is_err(),
+            "--watch with a --stdin source must be a usage error"
+        );
+    }
+
+    /// Shared verification plan: `view_code_and_stdin_parse_without_watch`.
+    ///
+    /// `--code` and `--stdin` parse on their own (without `--watch`),
+    /// recording the chosen source with `watch == false`: the
+    /// `conflicts_with = "watch"` declarations must not regress solo use
+    /// of the two fields whose attributes changed.
+    #[test]
+    fn view_code_and_stdin_parse_without_watch() {
+        let command = parse(["view", "--code", "graph TD"]).unwrap();
+        match command {
+            Command::View(args) => {
+                assert!(!args.watch, "watch must default to false without --watch");
+                assert_eq!(
+                    args.code.as_deref(),
+                    Some("graph TD"),
+                    "the --code source must be recorded"
+                );
+                assert!(!args.stdin);
+                assert!(args.file.is_none());
+            }
+            other => panic!("expected View, got {other:#?}"),
+        }
+
+        let command = parse(["view", "--stdin"]).unwrap();
+        match command {
+            Command::View(args) => {
+                assert!(!args.watch, "watch must default to false without --watch");
+                assert!(args.stdin, "the --stdin source must be recorded");
+                assert!(args.code.is_none());
+                assert!(args.file.is_none());
             }
             other => panic!("expected View, got {other:#?}"),
         }

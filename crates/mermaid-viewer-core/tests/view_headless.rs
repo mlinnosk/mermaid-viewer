@@ -1625,3 +1625,74 @@ fn headless_reraster_pending_clears_on_landing_when_in_band() {
         }
     });
 }
+
+/// Shared verification plan: `apply_update_swaps_drawn_content`.
+///
+/// The pixel proof of the update path through the real draw path
+/// (software renderer): the unit tests in `view.rs` cannot see textures,
+/// so this drives [`Window::apply_update`] — the seam the CLI window's
+/// per-frame update drain applies each re-rendered PNG through — through
+/// the exact frame harness. A window whose active tab shows a red 8×8
+/// solid (staged through [`Window::show_tab`] and committed at 705×705,
+/// fitting 564×564 at (118, 36) in the 800×564 content area) draws red
+/// at the content center; [`Window::apply_update`] then installs a blue
+/// 16×8 PNG (different color, different dimensions — the CLI path's eager
+/// texture at scale 1.0), and the same harness draws blue at the same
+/// probe point: the 16×8 fit (800×400 at (0, 118)) covers the content
+/// center, while the band of the old 8×8 rect (y 36..118) reverts to the
+/// clear color — the texture really was swapped, not just the state.
+#[test]
+fn apply_update_swaps_drawn_content() {
+    let _guard = HEADLESS_INIT_LOCK.lock().unwrap();
+    with_headless(800, 600, |rl, thread| {
+        let mut window = Window::new(0);
+        staged_ready(
+            rl,
+            thread,
+            &mut window,
+            "default",
+            "Update probe",
+            &solid_svg(8, 8, "#ff0000"),
+        );
+        let mut ui_closes = Vec::new();
+
+        // Before the update: the committed 705×705 red raster fits as
+        // 564×564 at (118, 36): the content center and the band the new
+        // image's fit will not cover are red.
+        let frame = render_frame(rl, thread, |d| {
+            assert!(
+                draw_tabbed_frame(d, &mut window, 800, 600, &mut ui_closes, &mut Vec::new()),
+                "the tab keeps the window open"
+            );
+        });
+        assert_pixel(&frame, 400, 318, Color::RED, 32);
+        assert_pixel(&frame, 400, 60, Color::RED, 32);
+
+        // The update seam installs the re-rendered PNG: a different
+        // color, a different dimension (16×8).
+        window
+            .apply_update(rl, thread, &solid_png(16, 8, [0, 0, 255, 255]))
+            .expect("the PNG update is applied to the active tab");
+
+        // After the update: the same probe point is the new image's
+        // color, the old rect's band reverts to the clear color, and the
+        // new fit's rect (800×400 at (0, 118)) is what fills the content
+        // area — all four content-area corners remain clear.
+        let frame = render_frame(rl, thread, |d| {
+            assert!(draw_tabbed_frame(
+                d, &mut window, 800, 600, &mut ui_closes, &mut Vec::new()
+            ));
+        });
+        assert_pixel(&frame, 400, 318, Color::BLUE, 32);
+        assert_pixel(&frame, 400, 60, BACKGROUND, 8);
+        for (x, y) in [(2, 40), (797, 40), (2, 595), (797, 595)] {
+            assert_pixel(&frame, x, y, BACKGROUND, 8);
+        }
+
+        // Headless frames get no mouse input: the bar requested no closes.
+        assert!(
+            ui_closes.is_empty(),
+            "no user closes are produced by a headless frame"
+        );
+    });
+}

@@ -98,9 +98,10 @@ fake window backend with the same state machine and no display, so the full
 ### `view` — show a diagram in a window
 
 ```text
-mermaid-viewer view [FILE] [-c|--code <SRC>] [--stdin] [-t|--title <T>] [-s|--scale <F>]
+mermaid-viewer view [FILE] [-c|--code <SRC>] [--stdin] [-w|--watch] [-t|--title <T>] [-s|--scale <F>]
 
 mermaid-viewer view diagram.mmd
+mermaid-viewer view --watch diagram.mmd
 mermaid-viewer view --code "graph TD
   A-->B"
 echo "graph TD
@@ -112,6 +113,13 @@ diagram is fit to the window on open; resize re-fits, the mouse wheel zooms,
 and left-drag pans. Defaults: title `Mermaid Diagram`, PNG scale `2.0`.
 `(These examples open a window, so they are shown as text, not runnable
 blocks.)`
+
+With `-w|--watch`, the window re-renders every time `FILE` changes on disk:
+your zoom and pan are retained across re-renders as well as the new image's
+bounds allow, and if a saved state fails to render (e.g. an incomplete save
+mid-edit) a diagnostic is printed on stderr and the window keeps the last
+good diagram. `--watch` requires a `FILE` source — pairing it with `--code`
+or `--stdin`, like any other second source, is a usage error (exit 2).
 
 ### `render` — write SVG or PNG to a file or stdout
 
