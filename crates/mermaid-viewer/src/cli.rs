@@ -44,6 +44,9 @@ pub enum Command {
     /// Render a diagram and show it in a GUI window.
     ///
     /// Blocks until the window is closed.
+    ///
+    /// Input containing `mermaid`-fenced code blocks (Markdown) is shown
+    /// as one tab per block in the same window.
     #[command(group = clap::ArgGroup::new("source").multiple(false).required(true))]
     View(ViewArgs),
 
@@ -67,7 +70,8 @@ pub enum OutputFormat {
 /// Arguments for `mermaid-viewer view`.
 #[derive(Debug, Clone, PartialEq, Args)]
 pub struct ViewArgs {
-    /// Path to a Mermaid source file.
+    /// Path to a Mermaid source file: a single diagram, or Markdown
+    /// containing `mermaid`-fenced code blocks (shown as tabs).
     #[arg(value_name = "FILE", group = "source")]
     pub file: Option<PathBuf>,
 
@@ -81,6 +85,8 @@ pub struct ViewArgs {
 
     /// Re-render the window whenever the file changes on disk.
     /// Requires a `FILE` source.
+    /// Not supported for Markdown input (input containing
+    /// `mermaid`-fenced code blocks); a typed error is returned.
     #[arg(short = 'w', long, requires = "file")]
     pub watch: bool,
 

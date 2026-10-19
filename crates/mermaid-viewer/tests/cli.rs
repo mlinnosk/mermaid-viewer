@@ -1,6 +1,7 @@
-//! Shared verification plan [M-2.b] — process-level tests for the CLI
-//! `render` subcommand, exercising the real binary end-to-end:
-//! file/stdin/code sources → SVG/PNG → file/stdout, plus the exit-code
+//! Shared verification plans [M-2.b] and [M-3] — process-level tests for
+//! the CLI `render` and `view` subcommands, exercising the real binary
+//! end-to-end: file/stdin/code sources → SVG/PNG → file/stdout, the
+//! `view` Markdown tabbed path (fake window backend) and its exit-code
 //! and stdout/stderr hygiene contract (diagnostics on stderr only).
 
 use std::io::Write;
@@ -8,6 +9,11 @@ use std::process::Stdio;
 
 const FLOWCHART: &str = "graph TD\n  A-->B";
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// Markdown with prose surrounding two valid `mermaid`-fenced blocks
+/// (the M-3 tabbed `view` fixture).
+const MARKDOWN_TWO_BLOCKS: &str = "## Intro\n\nSome prose.\n\n```mermaid\ngraph TD\n  A-->B\n```\n\n\
+                                   More prose.\n\n```mermaid\nflowchart LR\n  x --> y\n```\n\nDone.\n";
 
 fn bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_mermaid-viewer"))
@@ -210,5 +216,127 @@ fn view_watch_fake_env_smoke() {
         out.stderr.is_empty(),
         "no diagnostics expected on a clean watch startup: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Named (M-3): `cli_view_markdown_fake_env_smoke` — a temp `.md` with
+/// prose and two valid mermaid blocks, viewed with
+/// `MERMAID_VIEWER_FAKE_WINDOW=1`: the content-based routing takes the
+/// tabbed path (both blocks rendered to SVG, shown as tabs in the fake
+/// controller, `wait_closed` returns immediately) — exit 0, stdout empty,
+/// stderr empty.
+#[test]
+fn cli_view_markdown_fake_env_smoke() {
+    let dir = TempDir::new("md-smoke");
+    let input = dir.path("diagram.md");
+    std::fs::write(&input, MARKDOWN_TWO_BLOCKS).expect("write markdown file");
+
+    let out = std::process::Command::new(bin())
+        .env("MERMAID_VIEWER_FAKE_WINDOW", "1")
+        .arg("view")
+        .arg(&input)
+        .output()
+        .expect("spawn mermaid-viewer");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "view on Markdown under the fake window backend must exit 0; \
+         stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout must be empty on the view path: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "no diagnostics expected on a clean Markdown view: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Named (M-3): `cli_view_markdown_over_tab_limit_notes_omission` — 17
+/// valid blocks (one over the 16-tab limit) viewed with the fake window
+/// backend: the view still succeeds (exit 0) and stderr carries exactly
+/// the one tab-limit note.
+#[test]
+fn cli_view_markdown_over_tab_limit_notes_omission() {
+    let dir = TempDir::new("md-limit");
+    let input = dir.path("many.md");
+    let mut doc = String::new();
+    for n in 1..=17 {
+        doc.push_str(&format!("```mermaid\ngraph TD\n  A{n}-->B{n}\n```\n\n"));
+    }
+    std::fs::write(&input, doc).expect("write markdown file");
+
+    let out = std::process::Command::new(bin())
+        .env("MERMAID_VIEWER_FAKE_WINDOW", "1")
+        .arg("view")
+        .arg(&input)
+        .output()
+        .expect("spawn mermaid-viewer");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an over-limit Markdown view must still succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout must be empty on the view path: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("window tab limit"),
+        "stderr must carry the tab-limit note: {stderr}"
+    );
+    assert_eq!(
+        stderr,
+        "mermaid-viewer: found 17 mermaid diagrams; showing the first 16 (window tab limit)\n",
+        "exactly one tab-limit note, of the contracted form: {stderr:?}"
+    );
+}
+
+/// Named (M-3): `cli_view_markdown_bad_block_exits_1` — one valid block
+/// plus one parser-rejected block, viewed with the fake window backend:
+/// the renders run *before* the window (the fake one never opens), so the
+/// process exits 1 with `mermaid render failed` on stderr and empty
+/// stdout. Same rejected fixture class as `cli_render_bad_input_exits_1`.
+#[test]
+fn cli_view_markdown_bad_block_exits_1() {
+    let dir = TempDir::new("md-bad");
+    let input = dir.path("bad.md");
+    std::fs::write(
+        &input,
+        "```mermaid\ngraph TD\n  A-->B\n```\n\n```mermaid\ngitGraph\n  frobnicate\n```\n",
+    )
+    .expect("write markdown file");
+
+    let out = std::process::Command::new(bin())
+        .env("MERMAID_VIEWER_FAKE_WINDOW", "1")
+        .arg("view")
+        .arg(&input)
+        .output()
+        .expect("spawn mermaid-viewer");
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a parser-rejected Markdown block must exit 1; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("mermaid render failed"),
+        "stderr must name the render failure: {stderr}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout must be empty when a Markdown block fails to render: {:?}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }

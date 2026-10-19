@@ -8,15 +8,22 @@
 //!
 //! As of M-2.b the `render` handler is real end-to-end: source →
 //! [`NativeRenderer`] → bytes written to stdout (`-o -`) or a file.
-//! As of M-3.b the `view` handler is real: source → [`NativeRenderer`]
-//! (PNG at `--scale`) → [`run_blocking`] on a GUI window titled
-//! `--title`, blocking until the window is closed. `view --watch FILE`
-//! (M-2.b of the watch feature) is real as well: after the initial render
-//! (which still fails before any window opens), a watcher thread on the
-//! file's *parent* directory re-renders the diagram on every debounced
-//! file change and pushes the new PNG into the same window via
-//! [`run_blocking_updates`] (retaining zoom/pan); a failed re-render
-//! prints a diagnostic and keeps the last good diagram. As of M-4.b the
+//! As of M-3 the `view` handler classifies its input on *content*:
+//! input containing one or more `mermaid`-fenced code blocks (Markdown)
+//! renders every such block to SVG and shows them as tabs in the tabbed
+//! [`WindowController`] window (capped at its `MAX_TABS`, one stderr note
+//! when blocks are omitted), then blocks until the window is closed;
+//! `view --watch` on Markdown input is a typed runtime failure.
+//! Input with no such fences keeps the single-diagram path: source →
+//! [`NativeRenderer`] (PNG at `--scale`) → [`run_blocking`] on a GUI
+//! window titled `--title`, blocking until the window is closed.
+//! `view --watch FILE` (M-2.b of the watch feature) is real as well:
+//! after the initial render (which still fails before any window opens),
+//! a watcher thread on the file's *parent* directory re-renders the
+//! diagram on every debounced file change and pushes the new PNG into the
+//! same window via [`run_blocking_updates`] (retaining zoom/pan); a failed
+//! re-render prints a diagnostic and keeps the last good diagram.
+//! As of M-4.b the
 //! `mcp` handler is real: the core's [`DiagramServer`] is served on the
 //! stdio transport over a multi-threaded tokio runtime, and the process
 //! exits `0` on stdin EOF or Ctrl-C (closing the window first). stdout
@@ -35,10 +42,11 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use mermaid_viewer_core::error::{Error, Result};
+use mermaid_viewer_core::markdown::mermaid_blocks;
 use mermaid_viewer_core::mcp::CloseDiagramParams;
 use mermaid_viewer_core::{
     run_blocking, run_blocking_updates, DiagramServer, ImageFormat, NativeRenderer,
-    RenderedImage, RenderOptions,
+    RenderedImage, RenderOptions, WindowController,
 };
 // Method resolution only (the `.watch` arm in `spawn_watcher`); the
 // concrete type is `notify::RecommendedWatcher`.
@@ -81,10 +89,11 @@ fn main() {
 
 /// Run the parsed command.
 ///
-/// `view` (M-3.b), `render` (M-2.b), and `mcp` (M-4.b) are real:
+/// `view` (M-3), `render` (M-2.b), and `mcp` (M-4.b) are real:
 /// `view`/`render` read their source exactly once (stdin is single-shot,
 /// so a double read would silently see an empty stream), render it with
-/// [`NativeRenderer`], and then show it in a GUI window or write it to
+/// [`NativeRenderer`], and then show it in a GUI window (single diagram,
+/// or one tab per `mermaid`-fenced block for Markdown) or write it to
 /// stdout/a file (a missing file fails early with a typed [`Error::Io`]).
 /// `mcp` takes no diagram input and serves the core's [`DiagramServer`]
 /// over its own stdio transport.
@@ -172,7 +181,33 @@ async fn serve_mcp() -> Result<()> {
     Ok(())
 }
 
-/// The `view` handler (M-3.b): `source` → [`NativeRenderer`] (PNG at
+/// The `view` handler (M-3): classify the input on *content* —
+/// [`mermaid_blocks`] — and route:
+///
+/// * No `mermaid`-fenced blocks: the whole input is a single diagram; the
+///   single-diagram path runs unchanged ([`run_view_single`]).
+/// * One or more `mermaid`-fenced blocks (Markdown): the tabbed path
+///   ([`run_view_markdown`]) renders every shown block to SVG and shows
+///   one tab per block in the [`WindowController`] window, blocking until
+///   the window is closed.
+///
+/// The classification is content-based for every source form (`FILE`,
+/// `--code`, `--stdin`): no file-extension logic. On both paths the
+/// render(s) run *before* any window/GL initialization: a parser
+/// rejection is a typed [`Error::Render`] (exit 1 in [`main`]) and no
+/// window is ever opened. With `MERMAID_VIEWER_FAKE_WINDOW=1` the core's
+/// fake window backend takes over, so both paths run without a display
+/// (CI).
+fn run_view(source: &str, args: &ViewArgs) -> Result<()> {
+    let blocks = mermaid_blocks(source);
+    if blocks.is_empty() {
+        run_view_single(source, args)
+    } else {
+        run_view_markdown(&blocks, args)
+    }
+}
+
+/// The `view` single-diagram path: `source` → [`NativeRenderer`] (PNG at
 /// `--scale`) → [`run_blocking`], which shows the diagram in a GUI window
 /// titled `--title` on the current thread and blocks until the window is
 /// closed (ESC or window close).
@@ -187,7 +222,7 @@ async fn serve_mcp() -> Result<()> {
 /// render is followed by [`run_view_watch`]: a watcher thread pushes
 /// re-rendered PNGs into the window's update channel while
 /// [`run_blocking_updates`] runs.
-fn run_view(source: &str, args: &ViewArgs) -> Result<()> {
+fn run_view_single(source: &str, args: &ViewArgs) -> Result<()> {
     let image = NativeRenderer::new().render(
         source,
         ImageFormat::Png,
@@ -207,6 +242,58 @@ fn run_view(source: &str, args: &ViewArgs) -> Result<()> {
     } else {
         run_blocking(&args.title, &image)
     }
+}
+
+/// The `view` Markdown path (M-3): one tab per `mermaid`-fenced block in
+/// the tabbed [`WindowController`] window.
+///
+/// For the first `min(blocks.len(), [`WindowController::MAX_TABS`])`
+/// blocks, render SVG via [`NativeRenderer`] *before* spawning the
+/// controller (so a parser-rejected block is a typed [`Error::Render`] —
+/// exit 1, and no window ever opens), then spawn the controller titled
+/// `--title`, show the blocks as tabs `Diagram {n}` (IDs `diagram-{n}`,
+/// 1-based and contiguous over the blocks shown) with `--scale` as the
+/// `initial_scale` (raster-scale) hint, block on
+/// [`WindowController::wait_closed`] until the window is closed, and drop
+/// the controller (bounded shutdown).
+///
+/// Blocks beyond the tab limit are neither rendered nor validated; their
+/// omission is announced with exactly one stderr line (the view still
+/// succeeds, exit 0). `--watch` is rejected with a typed
+/// [`Error::View`] before any render.
+fn run_view_markdown(blocks: &[String], args: &ViewArgs) -> Result<()> {
+    if args.watch {
+        return Err(Error::View(
+            "--watch is not supported for Markdown input; remove --watch or point it at a single Mermaid diagram"
+                .to_string(),
+        ));
+    }
+    let shown = blocks.len().min(WindowController::MAX_TABS);
+    let renderer = NativeRenderer::new();
+    let images: Vec<RenderedImage> = blocks
+        .iter()
+        .take(shown)
+        .map(|block| renderer.render(block, ImageFormat::Svg, &RenderOptions::default()))
+        .collect::<Result<Vec<_>>>()?;
+    if blocks.len() > WindowController::MAX_TABS {
+        eprintln!(
+            "{BIN_NAME}: found {} mermaid diagrams; showing the first {} (window tab limit)",
+            blocks.len(),
+            WindowController::MAX_TABS
+        );
+    }
+    let controller = WindowController::spawn(&args.title)?;
+    for (n, image) in images.iter().enumerate() {
+        let tab = n + 1;
+        controller.show_tab(
+            &format!("diagram-{tab}"),
+            &format!("Diagram {tab}"),
+            image,
+            args.scale,
+        )?;
+    }
+    controller.wait_closed();
+    Ok(())
 }
 
 /// The `view --watch` handler (M-2.b): the initial `image` was rendered
@@ -515,6 +602,62 @@ mod tests {
             run(command).is_ok(),
             "view path must succeed under the fake window backend"
         );
+    }
+
+    /// M-3 wiring, proven headless: with the core's fake window backend
+    /// env var set, `view --code` on Markdown holding two fenced mermaid
+    /// blocks takes the tabbed path (SVG renders → [`WindowController`]
+    /// tabs `diagram-1`/`diagram-2` → [`WindowController::wait_closed`],
+    /// which returns immediately under the fake backend) and returns `Ok`
+    /// without a display.
+    #[test]
+    fn run_view_markdown_fake_env_returns_ok() {
+        std::env::set_var("MERMAID_VIEWER_FAKE_WINDOW", "1");
+        let command = Command::View(ViewArgs {
+            file: None,
+            code: Some(
+                "Intro\n\n```mermaid\ngraph TD\n  A-->B\n```\n\nProse.\n\n```mermaid\n\
+                 flowchart LR\n  x --> y\n```\n"
+                    .to_string(),
+            ),
+            stdin: false,
+            watch: false,
+            title: DEFAULT_TITLE.to_string(),
+            scale: 2.0,
+        });
+        assert!(
+            run(command).is_ok(),
+            "the Markdown view path must succeed under the fake window backend"
+        );
+    }
+
+    /// M-3: `--watch` on Markdown input (a `FILE` source whose content
+    /// holds `mermaid`-fenced blocks) is a typed [`Error::View`] before
+    /// any render (and before any window), exit 1 in [`main`].
+    #[test]
+    fn run_view_markdown_with_watch_is_view_error() {
+        let path = std::env::temp_dir().join(format!(
+            "mermaid-viewer-md-watch-{}-{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, "```mermaid\ngraph TD\n  A-->B\n```\n").unwrap();
+        let command = Command::View(ViewArgs {
+            file: Some(path.clone()),
+            code: None,
+            stdin: false,
+            watch: true,
+            title: DEFAULT_TITLE.to_string(),
+            scale: 2.0,
+        });
+        assert!(
+            matches!(run(command), Err(Error::View(_))),
+            "--watch on Markdown input must be a typed view error"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Render failure is the first fallible step of the `view` path: a
