@@ -51,8 +51,7 @@ pub fn mermaid_blocks(source: &str) -> Vec<String> {
         };
         // Index of the closing fence, if any; an unterminated fence ends at
         // end of input.
-        let close_idx = (i + 1..lines.len())
-            .find(|&j| is_fence_close(lines[j], ch, run));
+        let close_idx = (i + 1..lines.len()).find(|&j| is_fence_close(lines[j], ch, run));
         let (body_end, next) = match close_idx {
             Some(j) => (j, j + 1),
             None => (lines.len(), lines.len()),
@@ -137,7 +136,8 @@ mod tests {
     /// then exactly those two bodies are returned, in order, trimmed.
     #[test]
     fn markdown_extracts_blocks_in_order() {
-        let doc = "## Intro\n\nSome prose.\n\n```mermaid\ngraph TD\n  A-->B\n```\n\nMore prose.\n\n\
+        let doc =
+            "## Intro\n\nSome prose.\n\n```mermaid\ngraph TD\n  A-->B\n```\n\nMore prose.\n\n\
                    ```mermaid\nflowchart LR\n  x --> y\n```\n\nDone.\n";
         assert_eq!(
             mermaid_blocks(doc),
@@ -165,7 +165,8 @@ mod tests {
     /// bodies are returned; a ```-opened block is not closed by ~~~.
     #[test]
     fn markdown_supports_tilde_and_long_fences() {
-        let doc = "~~~mermaid\ngraph TD\n  A-->B\n~~~\n\n````mermaid\nflowchart LR\n  x --> y\n````\n";
+        let doc =
+            "~~~mermaid\ngraph TD\n  A-->B\n~~~\n\n````mermaid\nflowchart LR\n  x --> y\n````\n";
         assert_eq!(
             mermaid_blocks(doc),
             vec!["graph TD\n  A-->B", "flowchart LR\n  x --> y"]
@@ -173,10 +174,7 @@ mod tests {
 
         // `~~~` is body content of a backtick-opened block, not a closer.
         let doc2 = "```mermaid\ngraph TD\n~~~\n  A-->B\n```\n";
-        assert_eq!(
-            mermaid_blocks(doc2),
-            vec!["graph TD\n~~~\n  A-->B"]
-        );
+        assert_eq!(mermaid_blocks(doc2), vec!["graph TD\n~~~\n  A-->B"]);
     }
 
     /// Given an unclosed mermaid fence when extracting then the body is the

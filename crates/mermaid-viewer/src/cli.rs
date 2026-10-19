@@ -76,7 +76,13 @@ pub struct ViewArgs {
     pub file: Option<PathBuf>,
 
     /// Mermaid source code, passed inline.
-    #[arg(short = 'c', long, value_name = "SRC", group = "source", conflicts_with = "watch")]
+    #[arg(
+        short = 'c',
+        long,
+        value_name = "SRC",
+        group = "source",
+        conflicts_with = "watch"
+    )]
     pub code: Option<String>,
 
     /// Read the Mermaid source from stdin.
@@ -184,7 +190,10 @@ mod tests {
         let command = parse(["view", "d.mmd"]).unwrap();
         match command {
             Command::View(args) => {
-                assert!(!args.watch, "watch must default to false when --watch is absent");
+                assert!(
+                    !args.watch,
+                    "watch must default to false when --watch is absent"
+                );
                 assert_eq!(
                     args.file.as_deref(),
                     Some(std::path::Path::new("d.mmd")),

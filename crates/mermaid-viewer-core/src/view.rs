@@ -1709,7 +1709,9 @@ impl Window {
             // Unreachable: the ID came from the live active tab — keep the
             // state untouched (the fresh texture is dropped with the
             // function) if it ever is.
-            return Err(Error::View("the window has no active tab to update".to_string()));
+            return Err(Error::View(
+                "the window has no active tab to update".to_string(),
+            ));
         }
         // Swap the texture into the active slot. The CLI path's eager
         // textures carry the image's own pixels at scale 1.0, like
@@ -2722,10 +2724,7 @@ impl WindowController {
                 let open = view.open.load(Ordering::Acquire);
                 // A finished GUI thread is closed: its window state cannot
                 // change anymore, so the poll ends with the thread.
-                let gui_running = view
-                    .thread
-                    .as_ref()
-                    .is_some_and(|t| !t.is_finished());
+                let gui_running = view.thread.as_ref().is_some_and(|t| !t.is_finished());
                 (open, gui_running)
             };
             if !open || !gui_running {
@@ -3999,30 +3998,37 @@ mod tests {
 
         assert!(tabs.update_content("a", &image_b), "a known ID is updated");
         let tab = &tabs.tabs[0];
-        assert_eq!(tab.image.format, image_b.format, "the content's format is B's");
+        assert_eq!(
+            tab.image.format, image_b.format,
+            "the content's format is B's"
+        );
         assert_eq!(
             (tab.image.width, tab.image.height),
             (image_b.width, image_b.height),
             "the content's dimensions are B's"
         );
-        assert_eq!(&tab.image.bytes, &image_b.bytes, "the content's bytes are B's");
+        assert_eq!(
+            &tab.image.bytes, &image_b.bytes,
+            "the content's bytes are B's"
+        );
         assert_eq!(tab.zoom, 2.5, "the zoom is retained");
         assert_eq!(tab.pan_x, 42.0, "the pan_x is retained");
         assert_eq!(tab.pan_y, -8.5, "the pan_y is retained");
         assert_eq!(tab.label, "A", "the label is retained");
         assert_eq!(tabs.active_index(), 1, "the active index is unchanged");
         assert_eq!(
-            tabs.tabs[1].image.width,
-            image_a.width,
+            tabs.tabs[1].image.width, image_a.width,
             "the other tab is untouched"
         );
 
         // An unknown ID: `false`, and nothing changes.
-        assert!(!tabs.update_content("nope", &image_a), "an unknown ID is a no-op");
+        assert!(
+            !tabs.update_content("nope", &image_a),
+            "an unknown ID is a no-op"
+        );
         let tab = &tabs.tabs[0];
         assert_eq!(
-            &tab.image.bytes,
-            &image_b.bytes,
+            &tab.image.bytes, &image_b.bytes,
             "the unknown-ID update changed no content"
         );
         assert_eq!(tab.zoom, 2.5, "…no zoom");
@@ -4048,8 +4054,10 @@ mod tests {
         // (a) Two queued PNGs: `Ok`, and both updates are consumed.
         {
             let (tx, rx) = mpsc::channel::<RenderedImage>();
-            tx.send(test_png(4, 4, [1, 2, 3, 255])).expect("queue update 1");
-            tx.send(test_png(8, 2, [4, 5, 6, 255])).expect("queue update 2");
+            tx.send(test_png(4, 4, [1, 2, 3, 255]))
+                .expect("queue update 1");
+            tx.send(test_png(8, 2, [4, 5, 6, 255]))
+                .expect("queue update 2");
             drop(tx);
             assert!(
                 run_blocking_updates("fake", &initial, &rx).is_ok(),
@@ -4064,7 +4072,8 @@ mod tests {
         // (b) A queued SVG: a typed [`Error::View`] (and no window).
         {
             let (tx, rx) = mpsc::channel::<RenderedImage>();
-            tx.send(test_svg(8, 8, "#123456")).expect("queue the SVG update");
+            tx.send(test_svg(8, 8, "#123456"))
+                .expect("queue the SVG update");
             drop(tx);
             let err = run_blocking_updates("fake", &initial, &rx)
                 .expect_err("a non-PNG update is rejected");

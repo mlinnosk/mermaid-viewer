@@ -45,8 +45,8 @@ use mermaid_viewer_core::error::{Error, Result};
 use mermaid_viewer_core::markdown::mermaid_blocks;
 use mermaid_viewer_core::mcp::CloseDiagramParams;
 use mermaid_viewer_core::{
-    run_blocking, run_blocking_updates, DiagramServer, ImageFormat, NativeRenderer,
-    RenderedImage, RenderOptions, WindowController,
+    run_blocking, run_blocking_updates, DiagramServer, ImageFormat, NativeRenderer, RenderOptions,
+    RenderedImage, WindowController,
 };
 // Method resolution only (the `.watch` arm in `spawn_watcher`); the
 // concrete type is `notify::RecommendedWatcher`.
@@ -418,9 +418,7 @@ fn rerender_and_send(target: &Path, scale: f64, tx: &Sender<RenderedImage>) -> b
     match NativeRenderer::new().render(
         &source,
         ImageFormat::Png,
-        &RenderOptions {
-            png_scale: scale,
-        },
+        &RenderOptions { png_scale: scale },
     ) {
         Ok(image) => tx.send(image).is_ok(),
         Err(err) => {

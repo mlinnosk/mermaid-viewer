@@ -1680,7 +1680,12 @@ fn apply_update_swaps_drawn_content() {
         // area — all four content-area corners remain clear.
         let frame = render_frame(rl, thread, |d| {
             assert!(draw_tabbed_frame(
-                d, &mut window, 800, 600, &mut ui_closes, &mut Vec::new()
+                d,
+                &mut window,
+                800,
+                600,
+                &mut ui_closes,
+                &mut Vec::new()
             ));
         });
         assert_pixel(&frame, 400, 318, Color::BLUE, 32);
