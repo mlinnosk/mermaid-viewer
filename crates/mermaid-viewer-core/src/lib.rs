@@ -8,6 +8,9 @@
 //!   controller modes, for humans and for coding agents.
 //! - **`mcp`** — a stdio MCP server (`DiagramServer`) exposing the
 //!   `show_diagram` / `close_diagram` tools.
+//! - **`markdown`** — pure extraction of `mermaid`-tagged fenced code
+//!   blocks out of Markdown text (single-diagram vs tabbed-Markdown
+//!   classification); compiled unconditionally.
 //!
 //! All fallible operations return [`error::Result<T>`] with a typed
 //! [`error::Error`]; the crate never panics on bad diagram input.
@@ -37,6 +40,7 @@ compile_error!(
 );
 
 pub mod error;
+pub mod markdown;
 pub mod render;
 
 /// The raylib diagram window (blocking + controller modes). Compiled under
