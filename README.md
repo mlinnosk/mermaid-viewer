@@ -102,15 +102,31 @@ mermaid-viewer view [FILE] [-c|--code <SRC>] [--stdin] [-w|--watch] [-t|--title 
 
 mermaid-viewer view diagram.mmd
 mermaid-viewer view --watch diagram.mmd
+mermaid-viewer view notes.md       # Markdown with mermaid fences: one tab per block
 mermaid-viewer view --code "graph TD
   A-->B"
 echo "graph TD
   A-->B" | mermaid-viewer view --stdin
 ```
 
-Blocks until the window is closed (ESC or the window close button). The
-diagram is fit to the window on open; resize re-fits, the mouse wheel zooms,
-and left-drag pans. Defaults: title `Mermaid Diagram`, PNG scale `2.0`.
+The input is classified by *content*, identically for `FILE`, `--code`, and
+`--stdin`:
+
+- **Single diagram** — the input has no `mermaid`-tagged fenced code
+  blocks: the whole input is rendered to PNG and shown in a window titled
+  `--title`. The diagram is fit to the window on open; resize re-fits, the
+  mouse wheel zooms, and left-drag pans.
+- **Markdown** — the input contains one or more `mermaid`-tagged fenced
+  code blocks: every block is rendered to SVG *before* the window opens
+  (a block the parser rejects is an error, exit `1`, with no window), and
+  the blocks are shown as tabs in the tabbed window — one tab per block,
+  labelled `Diagram 1`, `Diagram 2`, … (the same tab bar the MCP server
+  uses). At most 16 blocks (the window's tab limit) are shown; blocks
+  beyond the limit are omitted with a one-line note on stderr, and
+  `--scale` is the tabs' initial raster-scale hint.
+
+Both paths block until the window is closed (ESC or the window close
+button), then exit `0`. Defaults: title `Mermaid Diagram`, scale `2.0`.
 `(These examples open a window, so they are shown as text, not runnable
 blocks.)`
 
@@ -119,7 +135,9 @@ your zoom and pan are retained across re-renders as well as the new image's
 bounds allow, and if a saved state fails to render (e.g. an incomplete save
 mid-edit) a diagnostic is printed on stderr and the window keeps the last
 good diagram. `--watch` requires a `FILE` source — pairing it with `--code`
-or `--stdin`, like any other second source, is a usage error (exit 2).
+or `--stdin`, like any other second source, is a usage error (exit 2) — and
+it applies to single-diagram sources only: a source containing
+`mermaid`-fenced code blocks (Markdown) is a typed runtime error (exit 1).
 
 ### `render` — write SVG or PNG to a file or stdout
 
@@ -228,12 +246,14 @@ any instant: switching tabs frees the outgoing tab's texture (the new tab
 rasterizes on demand), and every raster is clamped to 16,777,216 pixels
 (4096 × 4096 ≈ 64 MiB of RGBA8), which bounds texture memory.
 
-Markdown support (parsing Mermaid blocks out of Markdown) and multiple
-simultaneous OS windows are unsupported: the server is one window with a
-tab bar. The on-demand rendering above changes only the documented
-`scale` meaning — the MCP wire contract (the two tools, their schemas,
-statuses, and result bodies) and the CLI (`view`/`render`, one eager PNG
-per diagram) are unchanged.
+Markdown *block extraction* is supported for `view`: a source containing
+one or more `mermaid`-tagged fenced code blocks is rendered as one tab per
+block in the tabbed window (see the `view` section above). `render` and
+`mcp` remain single-diagram — one diagram in, one output. Multiple
+simultaneous OS windows are unsupported: `view` and the server are one
+window with a tab bar. The on-demand rendering above changes only the
+documented `scale` meaning — the MCP wire contract (the two tools, their
+schemas, statuses, and result bodies) is unchanged.
 
 ## Renderer coverage
 
