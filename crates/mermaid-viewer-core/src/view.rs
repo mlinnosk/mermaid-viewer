@@ -2688,6 +2688,52 @@ impl WindowController {
             }
         }
     }
+
+    /// The interval [`Self::wait_closed`] sleeps between re-reads of the
+    /// real backend's open state (tens of milliseconds: immediate enough
+    /// that the return on close feels instant, cheap enough that the poll
+    /// never competes with the GUI thread's per-frame work).
+    const WAIT_CLOSED_POLL: Duration = Duration::from_millis(50);
+
+    /// Blocks the calling thread until the window is no longer open — the
+    /// user closed it (window close / ESC / last tab) — or the GUI thread
+    /// has finished; then returns.
+    ///
+    /// The fake backend returns immediately: it has no display and no user
+    /// to close anything (the same fast-path [`run_blocking_updates`] takes
+    /// under `MERMAID_VIEWER_FAKE_WINDOW`).
+    ///
+    /// Intended for a controller whose tabs were just shown: the CLI
+    /// `view`'s tabbed path blocks here until the window is closed, the
+    /// way [`run_blocking`] does for the single-diagram window. It opens
+    /// and closes nothing itself — a controller whose window was never
+    /// opened (or was already closed) returns immediately.
+    ///
+    /// Infallible and safe to call from any thread; the real-backend poll
+    /// loop never holds the [`RealView`] mutex across the sleep.
+    pub fn wait_closed(&self) {
+        let Inner::Real(view) = &self.inner else {
+            // Fake backend: no display, no user — nothing to wait for.
+            return;
+        };
+        loop {
+            let (open, gui_running) = {
+                let view = view.lock().unwrap_or_else(|e| e.into_inner());
+                let open = view.open.load(Ordering::Acquire);
+                // A finished GUI thread is closed: its window state cannot
+                // change anymore, so the poll ends with the thread.
+                let gui_running = view
+                    .thread
+                    .as_ref()
+                    .is_some_and(|t| !t.is_finished());
+                (open, gui_running)
+            };
+            if !open || !gui_running {
+                return;
+            }
+            std::thread::sleep(Self::WAIT_CLOSED_POLL);
+        }
+    }
 }
 
 impl Drop for WindowController {
@@ -3374,6 +3420,41 @@ mod tests {
         controller.close();
         controller.close();
         assert!(!controller.is_open(), "close is idempotent");
+    }
+
+    /// Shared verification plan: `view_wait_closed_fake_returns_immediately`.
+    ///
+    /// With the fake backend enabled and a controller holding one
+    /// `show_tab`-ed SVG tab, `wait_closed()` returns promptly without
+    /// blocking: the fake backend has no display and no user to close the
+    /// window (mirrors [`run_blocking_updates`]'s fake fast-path).
+    ///
+    /// `MERMAID_VIEWER_FAKE_WINDOW` is process-global but read only at
+    /// [`WindowController::spawn`], and every fake test in this module sets
+    /// the same value, so this cannot race any other test in the lib test
+    /// binary (same pattern as `tests/mcp.rs`).
+    #[test]
+    fn view_wait_closed_fake_returns_immediately() {
+        std::env::set_var(FAKE_WINDOW_ENV, "1");
+
+        // The fake backend never rasterizes: the SVG fixture's content and
+        // the show's scale hint are irrelevant here.
+        let image = test_svg(4, 4, "#123456");
+        let controller = WindowController::spawn("wait-closed").expect("fake spawn");
+        controller
+            .show_tab("a", "A", &image, 2.0)
+            .expect("show_tab opens the fake window");
+        assert!(controller.is_open(), "the one-tab fake window is OPEN");
+
+        // There is no user: `wait_closed` must return in the same call,
+        // not enter a sleep loop.
+        let start = std::time::Instant::now();
+        controller.wait_closed();
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "the fake `wait_closed` must not block (took {:?})",
+            start.elapsed()
+        );
     }
 
     /// Shared verification plan: `fake_tab_replace`.
