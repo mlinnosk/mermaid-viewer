@@ -22,6 +22,18 @@ png = "0.18"
 # audio, and without them raylib's C build compiles no miniaudio — which
 # matters on macOS, where raylib-sys 6.0.0's build script omits the
 # CoreAudio/AudioToolbox frameworks that a miniaudio build references.
+#
+# Dropped-module linking: with the models/audio C modules off, the safe
+# crate's `core::models`/`core::audio` FFI stubs reference C symbols the
+# library does not define. Linux/macOS linkers drop those references;
+# MSVC's link.exe does not (LNK1120). `build.rs` emits
+# `/FORCE:UNRESOLVED` on Windows — the workaround raylib-sys's own build
+# script prescribes for exactly this configuration. (The
+# `release_with_debug_info` feature, which would also fix the LNK4098
+# debug-CRT warning, is unusable: raylib-sys 6.0.0's build script assigns
+# its `profile` variable twice when it is enabled and fails to compile
+# with E0384. The LNK4098 warning is non-fatal, and the /MDd-vs-/MD mix
+# is safe here because the Rust↔C boundary passes only POD types.)
 raylib-ogl = { package = "raylib", version = "6.0", default-features = false, features = [
     "raygui",
     "GLFW_BUILD_X11",
