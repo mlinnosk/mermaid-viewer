@@ -26,18 +26,23 @@ png = "0.18"
 # Dropped-module linking: with the models/audio C modules off, the safe
 # crate's `core::models`/`core::audio` FFI stubs reference C symbols the
 # library does not define. Linux/macOS linkers drop those references;
-# MSVC's link.exe does not (LNK1120). `build.rs` emits
-# `cargo:rustc-link-arg-bin=/FORCE:UNRESOLVED` (plus the top-level
-# `rustc-link-arg` form) on Windows — the workaround raylib-sys's own
-# build script prescribes for exactly this configuration. The `-bin`
-# variant is required: plain `rustc-link-arg` from a dependency's build
-# script only reaches the top-level crate and is silently dropped when
-# linking the `mermaid-viewer` binary. (The
-# `release_with_debug_info` feature, which would also fix the LNK4098
-# debug-CRT warning, is unusable: raylib-sys 6.0.0's build script assigns
-# its `profile` variable twice when it is enabled and fails to compile
-# with E0384. The LNK4098 warning is non-fatal, and the /MDd-vs-/MD mix
-# is safe here because the Rust↔C boundary passes only POD types.)
+# MSVC's link.exe does not (LNK1120). The workaround —
+# `cargo:rustc-link-arg=/FORCE:UNRESOLVED`, which raylib-sys's own build
+# script prescribes for custom builds that turn off modules — is emitted
+# by *two* build scripts: this package's `build.rs` covers this
+# package's own link targets (in particular the integration-test
+# executables, which link the `raylib` rlib), and the
+# `mermaid-viewer` binary crate's `build.rs` covers the binary (and its
+# tests). Cargo applies `rustc-link-arg` only from the build script of
+# the package whose target is being linked, so each link needs the flag
+# from its own package's build script.
+#
+# (The `release_with_debug_info` feature, which would also fix the
+# LNK4098 debug-CRT warning, is unusable: raylib-sys 6.0.0's build
+# script assigns its `profile` variable twice when it is enabled and
+# fails to compile with E0384. The LNK4098 warning is non-fatal, and
+# the /MDd-vs-/MD mix is safe here because the Rust↔C boundary passes
+# only POD types.)
 raylib-ogl = { package = "raylib", version = "6.0", default-features = false, features = [
     "raygui",
     "GLFW_BUILD_X11",
