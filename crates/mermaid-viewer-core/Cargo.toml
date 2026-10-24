@@ -24,18 +24,18 @@ png = "0.18"
 # CoreAudio/AudioToolbox frameworks that a miniaudio build references.
 #
 # Dropped-module linking: with the models/audio C modules off, the safe
-# crate's `core::models`/`core::audio` FFI stubs reference C symbols the
-# library does not define. Linux/macOS linkers drop those references;
-# MSVC's link.exe does not (LNK1120). The workaround —
-# `cargo:rustc-link-arg=/FORCE:UNRESOLVED`, which raylib-sys's own build
-# script prescribes for custom builds that turn off modules — is emitted
-# by *two* build scripts: this package's `build.rs` covers this
-# package's own link targets (in particular the integration-test
-# executables, which link the `raylib` rlib), and the
-# `mermaid-viewer` binary crate's `build.rs` covers the binary (and its
-# tests). Cargo applies `rustc-link-arg` only from the build script of
-# the package whose target is being linked, so each link needs the flag
-# from its own package's build script.
+# crate's `core::models`/`core::audio` FFI stubs reference 21 C symbols
+# the library does not define. Linux/macOS linkers drop those
+# references; MSVC's link.exe does not (LNK1120). Rather than the
+# `/FORCE:UNRESOLVED` link-arg workaround raylib-sys prescribes (which
+# suppresses *all* unresolved-symbol errors and would mask real link
+# regressions), this package's `build.rs` compiles `src/link_stubs.c` —
+# the 21 missing symbols, each `abort()`ing — into a static library and
+# links it via `cargo:rustc-link-lib` / `cargo:rustc-link-search`.
+# Those directives propagate from a dependency's build script to every
+# link target that depends on this package (the integration-test
+# executables and the `mermaid-viewer` binary), so one build script
+# covers all Windows links.
 #
 # (The `release_with_debug_info` feature, which would also fix the
 # LNK4098 debug-CRT warning, is unusable: raylib-sys 6.0.0's build
@@ -71,6 +71,12 @@ schemars = { version = "1.2", optional = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 serde_json = "1"
+
+[build-dependencies]
+# Compiles `src/link_stubs.c` on Windows (see the `build.rs` docs). The
+# build script is a no-op on other platforms, but the build-dependency
+# itself is built everywhere.
+cc = "1"
 
 [features]
 default = ["view", "mcp"]
