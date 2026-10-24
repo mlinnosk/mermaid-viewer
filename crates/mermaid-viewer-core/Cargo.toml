@@ -16,8 +16,20 @@ png = "0.18"
 # The `raygui` feature enables the immediate-mode tab-bar UI (`gui_tab_bar`)
 # drawn by the controller window; both backend builds must compile the same UI
 # code, so the feature is enabled on both the OpenGL and software-renderer
-# configurations.
-raylib-ogl = { package = "raylib", version = "6.0", features = ["raygui"], optional = true }
+# configurations. `default-features = false` mirrors the `raylib-sw` feature
+# set (the same UI code must build under both backends) and drops the
+# default `USE_AUDIO`/`SUPPORT_MODULE_RAUDIO`: the application never uses
+# audio, and without them raylib's C build compiles no miniaudio — which
+# matters on macOS, where raylib-sys 6.0.0's build script omits the
+# CoreAudio/AudioToolbox frameworks that a miniaudio build references.
+raylib-ogl = { package = "raylib", version = "6.0", default-features = false, features = [
+    "raygui",
+    "GLFW_BUILD_X11",
+    "SUPPORT_MODULE_RSHAPES",
+    "SUPPORT_MODULE_RTEXT",
+    "SUPPORT_MODULE_RTEXTURES",
+    "SUPPORT_IMAGE_GENERATION",
+], optional = true }
 raylib-sw = { package = "raylib", version = "6.0", default-features = false, features = [
     "software_renderer",
     "raygui",

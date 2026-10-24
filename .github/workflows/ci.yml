@@ -2,7 +2,17 @@
 # checkout, with dependencies installed by this workflow alone, the five
 # contracted command groups (build, clippy -D warnings, fmt check,
 # `cargo test --workspace`, and the `view-headless` test pass) must all be
-# green on ubuntu-latest and windows-latest.
+# green on ubuntu-latest, windows-latest, and macos-latest.
+#
+# macOS leg (added after the original M-5 "no macOS CI target" non-goal):
+# the full contract, all five groups. raylib's CMake supports macOS for
+# both backends (Desktop: OpenGL 3.3 + Cocoa GLFW, no X11; Memory:
+# software renderer, no extra deps), and the `raylib-ogl` dependency is
+# built with `default-features = false` — the same feature set as
+# `raylib-sw` minus `software_renderer` — so no miniaudio is compiled.
+# That matters because raylib-sys 6.0.0's build script omits the
+# CoreAudio/AudioToolbox frameworks a miniaudio build would reference;
+# the application never uses audio, so dropping it is cost-free.
 
 name: CI
 
@@ -19,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
       - name: Check out
@@ -68,6 +78,17 @@ jobs:
             -latest -products * `
             -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
             -property installationPath
+
+      - name: "Verify toolchain (macOS runner defaults: Xcode CLT → CMake + clang/libclang)"
+        if: runner.os == 'macOS'
+        shell: pwsh
+        run: |
+          # Nothing to install: the macos-latest image ships CMake and the
+          # Xcode command-line tools (clang + libclang for bindgen) on
+          # PATH. Fail fast if any of the three is missing.
+          cmake --version
+          clang --version
+          Test-Path "/usr/local/lib/libclang.dylib"
 
       - name: Cache cargo
         uses: actions/cache@v4
