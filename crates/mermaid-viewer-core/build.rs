@@ -23,6 +23,13 @@ fn main() {
     // cross-compilation.
     let target = std::env::var("TARGET").expect("cargo sets TARGET for build scripts");
     if target.contains("windows") {
+        // `rustc-link-arg-bin` (unlike plain `rustc-link-arg`) is applied
+        // when linking *any* binary target, including when this crate is a
+        // dependency — plain `rustc-link-arg` only reaches the top-level
+        // crate and would be silently dropped for the `mermaid-viewer` bin.
+        println!("cargo:rustc-link-arg-bin=/FORCE:UNRESOLVED");
+        // Also emit the top-level form so a direct build of this crate
+        // (e.g. `cargo build -p mermaid-viewer-core`) links the same way.
         println!("cargo:rustc-link-arg=/FORCE:UNRESOLVED");
     }
 }

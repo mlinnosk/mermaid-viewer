@@ -27,8 +27,12 @@ png = "0.18"
 # crate's `core::models`/`core::audio` FFI stubs reference C symbols the
 # library does not define. Linux/macOS linkers drop those references;
 # MSVC's link.exe does not (LNK1120). `build.rs` emits
-# `/FORCE:UNRESOLVED` on Windows — the workaround raylib-sys's own build
-# script prescribes for exactly this configuration. (The
+# `cargo:rustc-link-arg-bin=/FORCE:UNRESOLVED` (plus the top-level
+# `rustc-link-arg` form) on Windows — the workaround raylib-sys's own
+# build script prescribes for exactly this configuration. The `-bin`
+# variant is required: plain `rustc-link-arg` from a dependency's build
+# script only reaches the top-level crate and is silently dropped when
+# linking the `mermaid-viewer` binary. (The
 # `release_with_debug_info` feature, which would also fix the LNK4098
 # debug-CRT warning, is unusable: raylib-sys 6.0.0's build script assigns
 # its `profile` variable twice when it is enabled and fails to compile
